@@ -12,7 +12,7 @@ meetingWindows = candidate => candidate.kind === 'Meet' ? readMeetingWindows(can
 
 const readMediaControls = mediaControls;
 const traceStart = Date.now();
-let tracePhase = 'before press';
+let tracePhase = 'before input';
 /** @param {object} target Selected Meet app and window */
 mediaControls = target => {
     const start = Date.now();
@@ -25,12 +25,12 @@ mediaControls = target => {
 const setMediaControl = setControl;
 /** @param {object} target Selected Meet app and window @param {Record<string, object[]>} controls @param {string} action */
 setControl = (target, controls, action) => {
-    tracePhase = 'after press';
+    tracePhase = 'after input';
     try {
         return setMediaControl(target, controls, action);
     } catch (error) {
-        if (error.message.startsWith('Pressed the meeting control, but could not confirm')) {
-            // Leave the original result intact and check once more without pressing again.
+        if (error.message.startsWith('Sent the Meet shortcut, but could not confirm')) {
+            // Leave the original result intact and check once more without sending any input.
             tracePhase = 'delayed read';
             try {
                 $.NSThread.sleepForTimeInterval(2);
