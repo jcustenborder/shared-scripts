@@ -1,5 +1,6 @@
 ObjC.import('AppKit');
 ObjC.import('ApplicationServices');
+ObjC.import('Carbon');
 ObjC.bindFunction('open', ['int', ['char *', 'int']]);
 ObjC.bindFunction('flock', ['int', ['int', 'int']]);
 ObjC.bindFunction('close', ['int', ['int']]);
@@ -253,12 +254,17 @@ function setControl(target, controls, action) {
     if (!elementMatches(button, options[action]) || elementMatches(button, options[opposite])) {
         throw new Error('The meeting control changed before it could be pressed. No press sent.');
     }
-    checkAX($.AXUIElementPerformAction(button, $('AXPress')), 'press the requested meeting control');
+    if (target.kind === 'Meet') {
+        sendMeetShortcut(workspace, target, action);
+    } else {
+        checkAX($.AXUIElementPerformAction(button, $('AXPress')), 'press the requested meeting control');
+    }
 
-    const failure = 'Pressed the meeting control, but could not confirm the requested state. Check the app before trying again.';
+    const sent = target.kind === 'Meet' ? 'Sent the Meet shortcut' : 'Pressed the meeting control';
+    const failure = `${sent}, but could not confirm the requested state. Check the app before trying again.`;
     try {
         if (waitFor(() => {
-            if (!focused(workspace, target)) throw new Error('Focus changed after the press.');
+            if (!focused(workspace, target)) throw new Error('Focus changed before confirmation.');
             const after = mediaControls(target);
             return after[action].length === 0 && after[opposite].length === 1;
         }, 1200)) return `Set: ${action}.`;
@@ -266,6 +272,20 @@ function setControl(target, controls, action) {
         throw new Error(`${failure} ${error.message}`);
     }
     throw new Error(failure);
+}
+
+/** @param {object} workspace NSWorkspace @param {object} target Selected Meet app and window @param {string} action */
+function sendMeetShortcut(workspace, target, action) {
+    // Chromium can accept AXPress without activating the web button. Use Meet's shortcut after checking its state.
+    const key = action === 'mute' || action === 'unmute' ? $.kVK_ANSI_D : $.kVK_ANSI_E;
+    const down = $.CGEventCreateKeyboardEvent(null, Number(key), true);
+    const up = $.CGEventCreateKeyboardEvent(null, Number(key), false);
+    if (!down || !up) throw new Error('Could not create the Meet shortcut. No key sent.');
+    $.CGEventSetFlags(down, Number($.kCGEventFlagMaskCommand));
+    $.CGEventSetFlags(up, Number($.kCGEventFlagMaskCommand));
+    if (!focused(workspace, target)) throw new Error('Focus changed before sending the Meet shortcut. No key sent.');
+    $.CGEventPostToPid(target.pid, down);
+    $.CGEventPostToPid(target.pid, up);
 }
 
 /** @param {number} requestedCount @param {number} inverseCount @param {boolean} enabled */
