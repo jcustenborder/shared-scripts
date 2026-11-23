@@ -1,0 +1,114 @@
+// Append to meeting-ui.js and run with osascript -l JavaScript.
+function run() {
+    const shim = 'com.google.Chrome.app.dbpkegghbgplfeaapbejbnfpbgnbjedf';
+    const meet = 'https://meet.google.com/';
+
+    expect(appKind(shim, meet), 'Meet', 'installed Meet shim');
+    expect(appKind('com.google.Chrome.app.otherinstallation', meet), 'Meet', 'another Meet installation');
+    for (const id of ['com.google.Chrome', 'com.google.Chrome.app.', 'com.google.Chrome.helper']) {
+        expect(appKind(id, meet), null, 'Chrome is not a Meet shim');
+    }
+    for (const url of ['https://calendar.google.com/', 'http://meet.google.com/',
+        'https://meet.google.com.example.com/', 'https://example.com/meet.google.com',
+        'https://meet.google.com@evil.example/', 'https://meet.google.com:8443/']) {
+        expect(appKind(shim, url), null, 'not an HTTPS Meet start URL');
+    }
+    expect(appKind('com.microsoft.teams2', ''), 'Teams', 'Teams desktop');
+    expect(appKind('us.zoom.xos', ''), 'Zoom', 'Zoom desktop');
+
+    expect(chooseMeeting([101, 202], 202), 1, 'prefer the frontmost meeting app');
+    expect(chooseMeeting([101], 999), 0, 'select the only background meeting');
+    refuses(() => chooseMeeting([], 999), 'No supported');
+    refuses(() => chooseMeeting([101, 202], 999), 'Multiple');
+    refuses(() => chooseMeeting([101, 101], 101), 'Multiple');
+
+    expect(controlDecision(1, 0, true), 'press', 'enabled control can set the requested state');
+    expect(controlDecision(0, 1, false), 'unchanged', 'do not reverse an already-correct state');
+    refuses(() => controlDecision(0, 0, false), 'verify');
+    refuses(() => controlDecision(1, 1, true), 'verify');
+    refuses(() => controlDecision(2, 0, true), 'verify');
+    refuses(() => controlDecision(1, 0, false), 'disabled');
+
+    expect(labelMatches('Turn on microphone (⌘ + D)', ['turn on microphone']), true, 'accept a shortcut hint');
+    expect(labelMatches('Unmute mic', ['mute mic']), false, 'never confuse inverse actions');
+    expect(labelMatches('Leave (not a shortcut ⌘)', ['leave']), false, 'ignore unrelated labels');
+    for (const args of [[], ['invalid'], ['mute', 'exit']]) refuses(() => requestedAction(args), 'Usage:');
+
+    const chrome = {bundleIdentifier: $('com.google.Chrome'), get terminate() {
+        throw new Error('Chrome received a quit request');
+    }};
+    refuses(() => quitMeeting(chrome, 'Meet'), 'No quit sent');
+    testMeetingLock();
+    testControlScope();
+    return 'Meeting decision tests passed.';
+}
+
+function testMeetingLock() {
+    const path = ObjC.unwrap($.NSTemporaryDirectory()) + `shared-scripts-meeting-test-${$.NSProcessInfo.processInfo.processIdentifier}.lock`;
+    try {
+        let microphoneLive = true;
+        const press = () => { microphoneLive = !microphoneLive; };
+        withMeetingLock(path, () => {
+            refuses(() => withMeetingLock(path, press), 'Another meeting shortcut');
+            press();
+        });
+        expect(microphoneLive, false, 'an overlapping mute cannot press the toggle twice');
+        refuses(() => withMeetingLock(path, () => { throw new Error('operation failed'); }), 'operation failed');
+        expect(withMeetingLock(path, () => 'acquired'), 'acquired', 'an error releases the lock');
+    } finally {
+        $.NSFileManager.defaultManager.removeItemAtPathError(path, null);
+    }
+}
+
+function testControlScope() {
+    const savedAttribute = attribute;
+    attribute = (node, key) => {
+        const value = node[key];
+        if (Array.isArray(value)) return {count: value.length, objectAtIndex: index => value[index]};
+        return value ?? null;
+    };
+    try {
+        const meetCall = {AXRole: 'AXButton', AXTitle: 'Leave call'};
+        const idle = {AXRole: 'AXButton', AXTitle: 'Leave'};
+        const background = [
+            {pid: 101, window: {AXChildren: [meetCall, {AXRole: 'AXButton', AXTitle: 'Turn off camera'}]}},
+            {pid: 202, window: {AXChildren: [meetCall]}},
+        ];
+        const eligible = background.filter(({window}) => isMeetingWindow(window, 'Meet')).map(({pid}) => pid);
+        refuses(() => chooseMeeting(eligible, 999), 'Multiple');
+        expect(isMeetingWindow(idle, 'Teams'), false, 'a generic Leave button can belong to a team, not a call');
+        expect(isMeetingWindow({...idle, AXDOMIdentifier: 'hangup-button'}, 'Teams'), true, 'Teams hangup control proves a call');
+
+        const participant = {AXRole: 'AXButton', AXTitle: 'Stop video'};
+        const ownCamera = {AXRole: 'AXMenuItem', AXTitle: 'Start video'};
+        const zoom = {
+            kind: 'Zoom',
+            window: {AXChildren: [{AXRole: 'AXButton', AXTitle: 'End meeting'}, participant]},
+            axApp: {AXMenuBar: {AXChildren: [
+                {AXRole: 'AXMenuBarItem', AXTitle: 'Meeting', AXChildren: [{AXRole: 'AXMenu', AXChildren: [ownCamera]}]},
+            ]}},
+        };
+        expect(isMeetingWindow(zoom.window, 'Zoom'), true, 'Zoom has a specific call marker');
+        const zoomControls = mediaControls(zoom);
+        expect(zoomControls['camera-off'].length, 0, 'ignore another participant’s Stop video');
+        expect(zoomControls['camera-on'][0], ownCamera, 'only use Zoom’s own Meeting menu command');
+    } finally {
+        attribute = savedAttribute;
+    }
+}
+
+/** @param {unknown} actual @param {unknown} expected @param {string} scenario */
+function expect(actual, expected, scenario) {
+    if (actual !== expected) throw new Error(`${scenario}: expected ${expected}, got ${actual}`);
+}
+
+/** @param {() => unknown} operation @param {string} message */
+function refuses(operation, message) {
+    try {
+        operation();
+    } catch (error) {
+        expect(error.message.includes(message), true, `refusal: ${error.message}`);
+        return;
+    }
+    throw new Error(`Operation should have refused: ${message}`);
+}
