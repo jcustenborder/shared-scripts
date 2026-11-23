@@ -30,3 +30,13 @@ For the automated decision tests (no meeting needed), run from the repository ro
 ```sh
 cat apple/meeting-ui.js apple/tests/meeting-tests.js | /usr/bin/osascript -l JavaScript
 ```
+
+## Diagnose Meet mic and camera actions
+
+In a solo throwaway call in the installed Meet app, set the control to the opposite of the state you want, then run this from the repository root:
+
+```sh
+cat apple/meeting-ui.js apple/tests/trace-meet-media.js | /usr/bin/osascript -l JavaScript - mute
+```
+
+Replace `mute` with `unmute`, `camera-off`, or `camera-on` to trace another action. The trace shows how long each read took and how many buttons match each action. It sends at most one press; if confirmation fails, it checks once more two seconds later without pressing again. Share the output and whether (and when) the mic or camera icon actually changed.
