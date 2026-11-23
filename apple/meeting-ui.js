@@ -1,5 +1,8 @@
 ObjC.import('AppKit');
 ObjC.import('ApplicationServices');
+ObjC.bindFunction('open', ['int', ['char *', 'int']]);
+ObjC.bindFunction('flock', ['int', ['int', 'int']]);
+ObjC.bindFunction('close', ['int', ['int']]);
 
 const meetPrefix = 'com.google.Chrome.app.';
 const inverse = {mute: 'unmute', unmute: 'mute', 'camera-on': 'camera-off', 'camera-off': 'camera-on'};
@@ -10,20 +13,45 @@ const labels = {
         'camera-on': ['turn on camera'], 'camera-off': ['turn off camera'],
     },
     Teams: {
-        leave: ['leave', 'leave call', 'hang up'],
+        leave: ['leave call', 'leave meeting', 'hang up'],
         mute: ['mute mic', 'mute microphone'], unmute: ['unmute mic', 'unmute microphone'],
         'camera-on': ['turn camera on'], 'camera-off': ['turn camera off'],
     },
     Zoom: {
-        leave: ['leave', 'leave meeting', 'end', 'end meeting'],
+        leave: ['leave meeting', 'end meeting'],
         mute: ['mute audio', 'mute my audio'], unmute: ['unmute audio', 'unmute my audio'],
         'camera-on': ['start video', 'start my video'], 'camera-off': ['stop video', 'stop my video'],
     },
 };
+const buttonRoles = ['AXButton', 'AXToggleButton', 'AXCheckBox'];
 
 /** @param {string[]} args */
 function run(args) {
     const action = requestedAction(args);
+    const lockPath = ObjC.unwrap($.NSTemporaryDirectory()) + 'shared-scripts-meeting.lock';
+    return withMeetingLock(lockPath, () => runAction(action));
+}
+
+/** @param {string} path @param {() => string} operation */
+function withMeetingLock(path, operation) {
+    const files = $.NSFileManager.defaultManager;
+    if (!files.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, true, $.NSDictionary.dictionary, null)) {
+        throw new Error('Could not create the meeting shortcut lock directory.');
+    }
+    const fd = $.open(path, 0); // O_RDONLY: lock the directory without changing its contents.
+    if (fd < 0) throw new Error('Could not open the meeting shortcut lock.');
+    try {
+        if ($.flock(fd, 2 | 4) !== 0) { // LOCK_EX | LOCK_NB
+            throw new Error('Another meeting shortcut is running or the lock is unavailable. Try again shortly.');
+        }
+        return operation();
+    } finally {
+        $.close(fd);
+    }
+}
+
+/** @param {string} action */
+function runAction(action) {
     const workspace = $.NSWorkspace.sharedWorkspace;
     const frontPID = workspace.frontmostApplication.processIdentifier;
     const apps = workspace.runningApplications;
@@ -45,13 +73,12 @@ function run(args) {
     }
     const target = meetings[chooseMeeting(meetings.map(({pid}) => pid), frontPID)];
     focusWindow(workspace, target);
-    const controls = windowControls(target.window, target.kind);
-    if (!inCall(controls) || !focused(workspace, target)) {
+    if (!isMeetingWindow(target.window, target.kind) || !focused(workspace, target)) {
         throw new Error('The selected call or focus changed before the meeting action.');
     }
     if (action === 'focus') return `Focused ${target.kind}.`;
     if (action === 'exit') return quitMeeting(target.app, target.kind);
-    return setControl(target, controls, action);
+    return setControl(target, mediaControls(target), action);
 }
 
 /** @param {string[]} args */
@@ -122,41 +149,72 @@ function meetingWindows({app, kind}) {
     checkAX($.AXUIElementSetMessagingTimeout(axApp, 1), 'set an Accessibility timeout');
     attribute(axApp, 'AXRole'); // Chrome's web app shim enables web accessibility on this query.
     return elements(attribute(axApp, 'AXWindows'))
-        .filter(window => inCall(windowControls(window, kind)))
+        .filter(window => isMeetingWindow(window, kind))
         .map(window => ({app, kind, pid, axApp, window}));
 }
 
 /** @param {object} window AXUIElement @param {string} kind */
-function windowControls(window, kind) {
-    const matches = {leave: [], mute: [], unmute: [], 'camera-on': [], 'camera-off': []};
+function isMeetingWindow(window, kind) {
+    for (const element of windowElements(window, kind)) {
+        if (!buttonRoles.includes(ObjC.unwrap(attribute(element, 'AXRole')))) continue;
+        if (kind === 'Teams' && ObjC.unwrap(attribute(element, 'AXDOMIdentifier')) === 'hangup-button') return true;
+        if (elementMatches(element, labels[kind].leave)) return true;
+    }
+    return false;
+}
+
+/** @param {object} window AXUIElement @param {string} kind */
+function* windowElements(window, kind) {
     const pending = [window];
     const deadline = Date.now() + 2500;
     while (pending.length) {
         if (Date.now() >= deadline) throw new Error(`Timed out reading ${kind}'s meeting window.`);
         const element = pending.pop();
-        const role = ObjC.unwrap(attribute(element, 'AXRole'));
-        if (['AXButton', 'AXToggleButton', 'AXCheckBox'].includes(role)) {
-            const title = ObjC.unwrap(attribute(element, 'AXTitle'));
-            const description = ObjC.unwrap(attribute(element, 'AXDescription'));
-            for (const key of Object.keys(matches)) {
-                if ((labelMatches(title, labels[kind][key]) || labelMatches(description, labels[kind][key]))
-                    && !matches[key].some(match => $.CFEqual(match, element))) matches[key].push(element);
-            }
-        }
+        yield element;
         for (const child of elements(attribute(element, 'AXChildren'))) pending.push(child);
     }
+}
+
+/** @param {object} target Selected app and window */
+function mediaControls(target) {
+    const matches = {mute: [], unmute: [], 'camera-on': [], 'camera-off': []};
+    const zoom = target.kind === 'Zoom';
+    const available = zoom ? zoomMenuItems(target.axApp) : windowElements(target.window, target.kind);
+    const roles = zoom ? ['AXMenuItem'] : buttonRoles;
+    for (const element of available) {
+        if (!roles.includes(ObjC.unwrap(attribute(element, 'AXRole')))) continue;
+        for (const key of Object.keys(matches)) {
+            if (elementMatches(element, labels[target.kind][key])
+                && !matches[key].some(match => $.CFEqual(match, element))) matches[key].push(element);
+        }
+    }
     return matches;
+}
+
+/** @param {object} axApp AXUIElement for Zoom */
+function zoomMenuItems(axApp) {
+    // Zoom's window can contain identically named controls for other participants.
+    const bar = attribute(axApp, 'AXMenuBar');
+    if (!bar) return [];
+    const headings = elements(attribute(bar, 'AXChildren')).filter(item =>
+        ObjC.unwrap(attribute(item, 'AXRole')) === 'AXMenuBarItem' &&
+        labelMatches(ObjC.unwrap(attribute(item, 'AXTitle')), ['meeting']));
+    if (headings.length !== 1) return [];
+    const menus = elements(attribute(headings[0], 'AXChildren'))
+        .filter(item => ObjC.unwrap(attribute(item, 'AXRole')) === 'AXMenu');
+    return menus.length === 1 ? elements(attribute(menus[0], 'AXChildren')) : [];
+}
+
+/** @param {object} element AXUIElement @param {string[]} expected */
+function elementMatches(element, expected) {
+    return labelMatches(ObjC.unwrap(attribute(element, 'AXTitle')), expected)
+        || labelMatches(ObjC.unwrap(attribute(element, 'AXDescription')), expected);
 }
 
 /** @param {string|null} label @param {string[]} expected */
 function labelMatches(label, expected) {
     return typeof label === 'string' &&
         expected.includes(label.trim().replace(/\s+\((?:[⌘⌃⌥⇧]\s*\+?\s*)+[a-z0-9]\)$/i, '').toLowerCase());
-}
-
-/** @param {Record<string, object[]>} controls */
-function inCall(controls) {
-    return controls.leave.length === 1 && Object.keys(inverse).some(action => controls[action].length === 1);
 }
 
 /** @param {object} workspace NSWorkspace @param {object} target Selected app and window */
@@ -183,17 +241,16 @@ function focused(workspace, target) {
 
 /** @param {object} target Selected app and window @param {Record<string, object[]>} controls @param {string} action */
 function setControl(target, controls, action) {
+    const workspace = $.NSWorkspace.sharedWorkspace;
+    if (!focused(workspace, target)) throw new Error('Focus changed before the meeting action.');
     const opposite = inverse[action];
     const [button] = controls[action];
     const enabled = button && ObjC.unwrap(attribute(button, 'AXEnabled')) === true;
     if (controlDecision(controls[action].length, controls[opposite].length, enabled) === 'unchanged') {
         return `Already set: ${action}.`;
     }
-    const title = ObjC.unwrap(attribute(button, 'AXTitle'));
-    const description = ObjC.unwrap(attribute(button, 'AXDescription'));
     const options = labels[target.kind];
-    if (!(labelMatches(title, options[action]) || labelMatches(description, options[action]))
-        || labelMatches(title, options[opposite]) || labelMatches(description, options[opposite])) {
+    if (!elementMatches(button, options[action]) || elementMatches(button, options[opposite])) {
         throw new Error('The meeting control changed before it could be pressed. No press sent.');
     }
     checkAX($.AXUIElementPerformAction(button, $('AXPress')), 'press the requested meeting control');
@@ -201,8 +258,9 @@ function setControl(target, controls, action) {
     const failure = 'Pressed the meeting control, but could not confirm the requested state. Check the app before trying again.';
     try {
         if (waitFor(() => {
-            const after = windowControls(target.window, target.kind);
-            return inCall(after) && after[action].length === 0 && after[opposite].length === 1;
+            if (!focused(workspace, target)) throw new Error('Focus changed after the press.');
+            const after = mediaControls(target);
+            return after[action].length === 0 && after[opposite].length === 1;
         }, 1200)) return `Set: ${action}.`;
     } catch (error) {
         throw new Error(`${failure} ${error.message}`);

@@ -18,7 +18,7 @@ Use the same hotkeys in the installed Google Meet web app, Microsoft Teams, and 
 ## What the actions do
 
 - The script prefers a verified call in the frontmost supported app. If nothing is recognized there, it looks for a single recognized call elsewhere. If several qualify, bring the intended app forward or close the extra meeting windows.
-- Mic and camera actions leave an already-correct state alone. The first version uses English accessibility labels. If controls are hidden, disabled, or no longer recognized after an app update, use the app's own controls rather than retrying blindly. In Zoom, you may need to enable **Always show meeting controls**.
+- Mic and camera actions leave an already-correct state alone. If two shortcuts overlap, the second one is refused rather than risking a double toggle. The first version uses English accessibility labels; Zoom's mic and camera actions use its **Meeting** menu, not the participant controls. If the script cannot recognize a control or it is disabled, use the app's own controls rather than retrying blindly.
 - `exit` requests a normal quit of the selected meeting app. It may close other windows owned by that app or show its usual confirmation. It does not click an **End for everyone** button, force quit, or send `⌘Q`. For Meet, it targets only the installed web app, never the Chrome browser or its tabs.
 
 ## Verify on a new Mac

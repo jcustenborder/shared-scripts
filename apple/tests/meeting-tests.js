@@ -32,23 +32,77 @@ function run() {
     expect(labelMatches('Turn on microphone (⌘ + D)', ['turn on microphone']), true, 'accept a shortcut hint');
     expect(labelMatches('Unmute mic', ['mute mic']), false, 'never confuse inverse actions');
     expect(labelMatches('Leave (not a shortcut ⌘)', ['leave']), false, 'ignore unrelated labels');
-    expect(inCall({leave: [{}], mute: [], unmute: [], 'camera-on': [], 'camera-off': []}),
-        false, 'a generic Leave button alone does not identify a call');
-    expect(inCall({leave: [{}], mute: [{}], unmute: [], 'camera-on': [], 'camera-off': []}),
-        true, 'a Leave button and personal media control identify a call');
     for (const args of [[], ['invalid'], ['mute', 'exit']]) refuses(() => requestedAction(args), 'Usage:');
 
-    const chrome = {bundleIdentifier: $('com.google.Chrome'), terminate: () => {
+    const chrome = {bundleIdentifier: $('com.google.Chrome'), get terminate() {
         throw new Error('Chrome received a quit request');
     }};
     refuses(() => quitMeeting(chrome, 'Meet'), 'No quit sent');
+    testMeetingLock();
+    testControlScope();
     return 'Meeting decision tests passed.';
 }
 
+function testMeetingLock() {
+    const path = ObjC.unwrap($.NSTemporaryDirectory()) + `shared-scripts-meeting-test-${$.NSProcessInfo.processInfo.processIdentifier}.lock`;
+    try {
+        let microphoneLive = true;
+        const press = () => { microphoneLive = !microphoneLive; };
+        withMeetingLock(path, () => {
+            refuses(() => withMeetingLock(path, press), 'Another meeting shortcut');
+            press();
+        });
+        expect(microphoneLive, false, 'an overlapping mute cannot press the toggle twice');
+        refuses(() => withMeetingLock(path, () => { throw new Error('operation failed'); }), 'operation failed');
+        expect(withMeetingLock(path, () => 'acquired'), 'acquired', 'an error releases the lock');
+    } finally {
+        $.NSFileManager.defaultManager.removeItemAtPathError(path, null);
+    }
+}
+
+function testControlScope() {
+    const savedAttribute = attribute;
+    attribute = (node, key) => {
+        const value = node[key];
+        if (Array.isArray(value)) return {count: value.length, objectAtIndex: index => value[index]};
+        return value ?? null;
+    };
+    try {
+        const meetCall = {AXRole: 'AXButton', AXTitle: 'Leave call'};
+        const idle = {AXRole: 'AXButton', AXTitle: 'Leave'};
+        const background = [
+            {pid: 101, window: {AXChildren: [meetCall, {AXRole: 'AXButton', AXTitle: 'Turn off camera'}]}},
+            {pid: 202, window: {AXChildren: [meetCall]}},
+        ];
+        const eligible = background.filter(({window}) => isMeetingWindow(window, 'Meet')).map(({pid}) => pid);
+        refuses(() => chooseMeeting(eligible, 999), 'Multiple');
+        expect(isMeetingWindow(idle, 'Teams'), false, 'a generic Leave button can belong to a team, not a call');
+        expect(isMeetingWindow({...idle, AXDOMIdentifier: 'hangup-button'}, 'Teams'), true, 'Teams hangup control proves a call');
+
+        const participant = {AXRole: 'AXButton', AXTitle: 'Stop video'};
+        const ownCamera = {AXRole: 'AXMenuItem', AXTitle: 'Start video'};
+        const zoom = {
+            kind: 'Zoom',
+            window: {AXChildren: [{AXRole: 'AXButton', AXTitle: 'End meeting'}, participant]},
+            axApp: {AXMenuBar: {AXChildren: [
+                {AXRole: 'AXMenuBarItem', AXTitle: 'Meeting', AXChildren: [{AXRole: 'AXMenu', AXChildren: [ownCamera]}]},
+            ]}},
+        };
+        expect(isMeetingWindow(zoom.window, 'Zoom'), true, 'Zoom has a specific call marker');
+        const zoomControls = mediaControls(zoom);
+        expect(zoomControls['camera-off'].length, 0, 'ignore another participant’s Stop video');
+        expect(zoomControls['camera-on'][0], ownCamera, 'only use Zoom’s own Meeting menu command');
+    } finally {
+        attribute = savedAttribute;
+    }
+}
+
+/** @param {unknown} actual @param {unknown} expected @param {string} scenario */
 function expect(actual, expected, scenario) {
     if (actual !== expected) throw new Error(`${scenario}: expected ${expected}, got ${actual}`);
 }
 
+/** @param {() => unknown} operation @param {string} message */
 function refuses(operation, message) {
     try {
         operation();
