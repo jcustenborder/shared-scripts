@@ -40,6 +40,7 @@ function run() {
     refuses(() => quitMeeting(chrome, 'Meet'), 'No quit sent');
     testMeetingLock();
     testControlScope();
+    testMeetMediaActions();
     return 'Meeting decision tests passed.';
 }
 
@@ -94,6 +95,59 @@ function testControlScope() {
         expect(zoomControls['camera-on'][0], ownCamera, 'only use Zoom’s own Meeting menu command');
     } finally {
         attribute = savedAttribute;
+    }
+}
+
+function testMeetMediaActions() {
+    const savedAttribute = attribute;
+    const savedFocused = focused;
+    const savedPress = $.AXUIElementPerformAction;
+    const savedPost = $.CGEventPostToPid;
+    const target = {kind: 'Meet', pid: 123, window: {}};
+    const button = {AXRole: 'AXButton', AXEnabled: true};
+    const events = [];
+    let newTitle;
+    attribute = (node, key) => node === target.window && key === 'AXChildren'
+        ? {count: 1, objectAtIndex: () => button}
+        : node[key] ?? null;
+    focused = () => true;
+    $.AXUIElementPerformAction = () => 0; // Reproduce the accepted press with no state change.
+    $.CGEventPostToPid = (pid, event) => {
+        const type = $.CGEventGetType(event);
+        events.push([pid, type, Number($.CGEventGetIntegerValueField(event, $.kCGKeyboardEventKeycode)),
+            Number($.CGEventGetFlags(event))]);
+        if (type === Number($.kCGEventKeyDown)) button.AXTitle = newTitle;
+    };
+    try {
+        for (const [action, before, after, keyCode] of [
+            ['mute', 'Turn off microphone', 'Turn on microphone', 2],
+            ['unmute', 'Turn on microphone', 'Turn off microphone', 2],
+            ['camera-off', 'Turn off camera', 'Turn on camera', 14],
+            ['camera-on', 'Turn on camera', 'Turn off camera', 14],
+        ]) {
+            events.length = 0;
+            newTitle = after;
+            button.AXTitle = before;
+            expect(setControl(target, mediaControls(target), action), `Set: ${action}.`, 'confirm changed Meet state');
+            expect(setControl(target, mediaControls(target), action), `Already set: ${action}.`, 'do not toggle twice');
+            const command = Number($.kCGEventFlagMaskCommand);
+            expect(JSON.stringify(events), JSON.stringify([[123, 10, keyCode, command], [123, 11, keyCode, command]]),
+                'send one Command shortcut to the Meet PID only');
+        }
+        events.length = 0;
+        button.AXTitle = 'Turn off microphone';
+        const controls = mediaControls(target);
+        const ambiguous = {...controls, mute: [button, button]};
+        refuses(() => setControl(target, ambiguous, 'mute'), 'unique');
+        let focusChecks = 0;
+        focused = () => ++focusChecks === 1;
+        refuses(() => setControl(target, controls, 'mute'), 'Focus changed');
+        expect(events.length, 0, 'do not send a shortcut with ambiguous state or lost focus');
+    } finally {
+        attribute = savedAttribute;
+        focused = savedFocused;
+        $.AXUIElementPerformAction = savedPress;
+        $.CGEventPostToPid = savedPost;
     }
 }
 
