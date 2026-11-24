@@ -137,11 +137,22 @@ function testControlScope() {
         expect(zoomWindowReport(call, zoom.axApp).recognized, true, 'diagnostics use the same call detection');
         expect(isMeetingWindow({...call, AXMain: false}, 'Zoom', zoom.axApp), false,
             'do not target a secondary window with the same shape');
-        expect(isMeetingWindow({...call, AXChildren: [...call.AXChildren, {AXRole: 'AXGroup'}]}, 'Zoom', zoom.axApp),
+        const layoutMisses = [];
+        expect(isMeetingWindow({...call, AXTitle: 'Private topic',
+            AXChildren: [...call.AXChildren, {AXRole: 'AXGroup'}]}, 'Zoom', zoom.axApp, layoutMisses),
             false, 'an active menu does not qualify a window with a different structure');
+        expect(JSON.stringify(layoutMisses),
+            JSON.stringify([{reason: 'layout', buttons: 4, tabGroups: 1, otherRoles: ['AXGroup']}]),
+            'capture the rejected structure without including the meeting title');
+        refuses(() => chooseMeeting([], 999, layoutMisses), 'Zoom detection: [{"reason":"layout"');
         expect(isMeetingWindow(call, 'Zoom', {}), false, 'the window structure alone does not prove a call');
         mute.AXEnabled = false;
-        expect(isMeetingWindow(call, 'Zoom', zoom.axApp), false, 'a disabled microphone command does not prove a call');
+        const menuMisses = [];
+        expect(isMeetingWindow(call, 'Zoom', zoom.axApp, menuMisses), false,
+            'a disabled microphone command does not prove a call');
+        expect(JSON.stringify(menuMisses),
+            JSON.stringify([{reason: 'menu', control: 'microphone', matches: 1, enabled: false}]),
+            'distinguish a disabled command from a missing command at the time of rejection');
         mute.AXEnabled = true;
         menu.AXChildren.push({...mute, AXTitle: 'Unmute audio'});
         expect(isMeetingWindow(call, 'Zoom', zoom.axApp), false, 'refuse contradictory Zoom menu controls');

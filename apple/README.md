@@ -55,7 +55,7 @@ In **System Settings → Privacy & Security**, enable the launcher you use, not 
 
 Try the actions in a throwaway meeting, including running each mic and camera action twice. With an ordinary Chrome window open, exit the installed Meet app and confirm the Chrome window and tabs remain. Then check that a Meet tab alone is not targeted.
 
-If a Zoom call isn't detected, run this from the repository root while Zoom is in the call:
+If a Zoom call isn't detected, check the `Zoom detection:` details in the error. For a separate snapshot, run this from the repository root while Zoom is in the call:
 
 ```sh
 /usr/bin/osascript apple/meeting.applescript diagnose-zoom
