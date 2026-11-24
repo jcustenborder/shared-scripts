@@ -122,6 +122,29 @@ function testControlScope() {
         const zoomControls = mediaControls(zoom);
         expect(zoomControls['camera-off'].length, 0, 'ignore another participant’s Stop video');
         expect(zoomControls['camera-on'][0], ownCamera, 'only use Zoom’s own Meeting menu command');
+
+        const tabGroup = {AXRole: 'AXTabGroup'};
+        const call = {AXRole: 'AXWindow', AXSubrole: 'AXStandardWindow', AXMain: true,
+            AXChildren: [{AXRole: 'AXButton'}, {AXRole: 'AXButton'}, {AXRole: 'AXButton'},
+                {AXRole: 'AXButton'}, tabGroup]};
+        const mute = {AXRole: 'AXMenuItem', AXTitle: 'Mute audio', AXEnabled: true};
+        const menu = zoom.axApp.AXMenuBar.AXChildren[0].AXChildren[0];
+        menu.AXChildren.push(mute);
+        for (const title of ['Zoom Meeting', 'Weekly sync', undefined]) {
+            expect(isMeetingWindow({...call, AXTitle: title}, 'Zoom', zoom.axApp), true,
+                'detect a verified Zoom call regardless of its title');
+        }
+        expect(zoomWindowReport(call, zoom.axApp).recognized, true, 'diagnostics use the same call detection');
+        expect(isMeetingWindow({...call, AXMain: false}, 'Zoom', zoom.axApp), false,
+            'do not target a secondary window with the same shape');
+        expect(isMeetingWindow({...call, AXChildren: [...call.AXChildren, {AXRole: 'AXGroup'}]}, 'Zoom', zoom.axApp),
+            false, 'an active menu does not qualify a window with a different structure');
+        expect(isMeetingWindow(call, 'Zoom', {}), false, 'the window structure alone does not prove a call');
+        mute.AXEnabled = false;
+        expect(isMeetingWindow(call, 'Zoom', zoom.axApp), false, 'a disabled microphone command does not prove a call');
+        mute.AXEnabled = true;
+        menu.AXChildren.push({...mute, AXTitle: 'Unmute audio'});
+        expect(isMeetingWindow(call, 'Zoom', zoom.axApp), false, 'refuse contradictory Zoom menu controls');
     } finally {
         attribute = savedAttribute;
     }

@@ -80,7 +80,7 @@ function runAction(action) {
     }
     const target = meetings[chooseMeeting(meetings.map(({pid}) => pid), frontPID)];
     focusWindow(workspace, target);
-    if (!isMeetingWindow(target.window, target.kind) || !focused(workspace, target)) {
+    if (!isMeetingWindow(target.window, target.kind, target.axApp) || !focused(workspace, target)) {
         throw new Error('The selected call or focus changed before the meeting action.');
     }
     if (action === 'focus') return `Focused ${target.kind}.`;
@@ -114,7 +114,8 @@ function diagnoseZoom() {
             const focusedWindow = result.recognizedBundle ? attribute(axApp, 'AXFocusedWindow') : null;
             result.windows = elements(attribute(axApp, 'AXWindows')).map(window => {
                 try {
-                    return {...zoomWindowReport(window), focused: focusedWindow !== null && $.CFEqual(focusedWindow, window)};
+                    return {...zoomWindowReport(window, result.recognizedBundle ? axApp : null),
+                        focused: focusedWindow !== null && $.CFEqual(focusedWindow, window)};
                 } catch (error) {
                     return {error: error.message};
                 }
@@ -128,9 +129,9 @@ function diagnoseZoom() {
     return JSON.stringify({macOS, appControl, zoomApps});
 }
 
-/** @param {object} window Zoom AXUIElement */
-function zoomWindowReport(window) {
-    const recognized = isMeetingWindow(window, 'Zoom');
+/** @param {object} window Zoom AXUIElement @param {object|null} [axApp] */
+function zoomWindowReport(window, axApp = null) {
+    const recognized = isMeetingWindow(window, 'Zoom', axApp);
     const markers = [];
     const identifiers = [];
     const roles = Object.create(null);
@@ -234,18 +235,28 @@ function meetingWindows({app, kind}) {
     checkAX($.AXUIElementSetMessagingTimeout(axApp, 1), 'set an Accessibility timeout');
     attribute(axApp, 'AXRole'); // Chrome's web app shim enables web accessibility on this query.
     return elements(attribute(axApp, 'AXWindows'))
-        .filter(window => isMeetingWindow(window, kind))
+        .filter(window => isMeetingWindow(window, kind, axApp))
         .map(window => ({app, kind, pid, axApp, window}));
 }
 
-/** @param {object} window AXUIElement @param {string} kind */
-function isMeetingWindow(window, kind) {
+/** @param {object} window AXUIElement @param {string} kind @param {object|null} [axApp] */
+function isMeetingWindow(window, kind, axApp = null) {
+    const zoomRoles = kind === 'Zoom' && axApp ? [] : null;
     for (const element of windowElements(window, kind)) {
-        if (!buttonRoles.includes(ObjC.unwrap(attribute(element, 'AXRole')))) continue;
+        const role = ObjC.unwrap(attribute(element, 'AXRole'));
+        if (zoomRoles && element !== window) zoomRoles.push(role);
+        if (!buttonRoles.includes(role)) continue;
         if (kind === 'Teams' && ObjC.unwrap(attribute(element, 'AXDOMIdentifier')) === 'hangup-button') return true;
         if (elementMatches(element, labels[kind].leave)) return true;
     }
-    return false;
+    // shortcut: only accept the observed Zoom window layout without a leave marker; revisit if Zoom exposes a stable identifier.
+    if (zoomRoles?.length !== 5 || !zoomRoles.includes('AXTabGroup') ||
+        zoomRoles.filter(role => role === 'AXButton').length !== 4 ||
+        ObjC.unwrap(attribute(window, 'AXSubrole')) !== 'AXStandardWindow' ||
+        ObjC.unwrap(attribute(window, 'AXMain')) !== true) return false;
+    const controls = mediaControls({kind, axApp});
+    return [[...controls.mute, ...controls.unmute], [...controls['camera-on'], ...controls['camera-off']]]
+        .every(matches => matches.length === 1 && ObjC.unwrap(attribute(matches[0], 'AXEnabled')) === true);
 }
 
 /** @param {object} window AXUIElement @param {string} kind */
