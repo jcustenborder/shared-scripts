@@ -7,6 +7,9 @@ ObjC.bindFunction('close', ['int', ['int']]);
 
 const meetPrefix = 'com.google.Chrome.app.';
 const inverse = {mute: 'unmute', unmute: 'mute', 'camera-on': 'camera-off', 'camera-off': 'camera-on'};
+const teamsMediaIDs = {
+    mute: 'microphone-button', unmute: 'microphone-button', 'camera-on': 'video-button', 'camera-off': 'video-button',
+};
 const labels = {
     Meet: {
         leave: ['leave call'],
@@ -34,7 +37,8 @@ const zoomControlHints = [...Object.values(labels.Zoom).flat(), 'join audio', 'j
 /** @param {string[]} args */
 function run(args) {
     const action = requestedAction(args);
-    if (action === 'diagnose-zoom') return diagnoseZoom();
+    if (action === 'diagnose-zoom') return diagnoseApp('Zoom');
+    if (action === 'diagnose-teams') return diagnoseApp('Teams');
     const lockPath = ObjC.unwrap($.NSTemporaryDirectory()) + 'shared-scripts-meeting.lock';
     return withMeetingLock(lockPath, () => runAction(action));
 }
@@ -73,14 +77,14 @@ function runAction(action) {
         throw new Error('Enable Accessibility for the app running the shortcut in System Settings → Privacy & Security.');
     }
 
-    const zoomMisses = [];
+    const diagnostics = {zoom: [], teams: []};
     const foreground = candidates.find(({app}) => app.processIdentifier === frontPID);
-    let meetings = foreground ? meetingWindows(foreground, zoomMisses) : [];
+    let meetings = foreground ? meetingWindows(foreground, diagnostics) : [];
     if (!meetings.length) {
         meetings = candidates.filter(candidate => candidate !== foreground)
-            .flatMap(candidate => meetingWindows(candidate, zoomMisses));
+            .flatMap(candidate => meetingWindows(candidate, diagnostics));
     }
-    const target = meetings[chooseMeeting(meetings.map(({pid}) => pid), frontPID, zoomMisses)];
+    const target = meetings[chooseMeeting(meetings.map(({pid}) => pid), frontPID, diagnostics)];
     focusWindow(workspace, target);
     if (!isMeetingWindow(target.window, target.kind, target.axApp) || !focused(workspace, target)) {
         throw new Error('The selected call or focus changed before the meeting action.');
@@ -92,22 +96,27 @@ function runAction(action) {
 
 /** @param {string[]} args */
 function requestedAction(args) {
-    if (args.length === 1 && [...Object.keys(inverse), 'focus', 'exit', 'diagnose-zoom'].includes(args[0])) return args[0];
-    throw new Error('Usage: osascript meeting.applescript <mute|unmute|camera-on|camera-off|focus|exit|diagnose-zoom>');
+    if (args.length === 1 && [...Object.keys(inverse), 'focus', 'exit', 'diagnose-zoom', 'diagnose-teams'].includes(args[0])) {
+        return args[0];
+    }
+    throw new Error('Usage: osascript meeting.applescript <mute|unmute|camera-on|camera-off|focus|exit|diagnose-zoom|diagnose-teams>');
 }
 
-function diagnoseZoom() {
+/** @param {'Zoom'|'Teams'} kind */
+function diagnoseApp(kind) {
     const appControl = $.AXIsProcessTrusted();
-    const zoomApps = [];
+    const zoom = kind === 'Zoom';
+    const bundlePattern = zoom ? /zoom/i : /^com\.microsoft\.teams/i;
+    const apps = [];
     for (const app of elements($.NSWorkspace.sharedWorkspace.runningApplications)) {
         const bundleID = ObjC.unwrap(app.bundleIdentifier) || '';
-        if (app.isTerminated || !/zoom/i.test(bundleID)) continue;
-        const result = {bundleID, recognizedBundle: runningKind(app) === 'Zoom'};
+        if (app.isTerminated || !bundlePattern.test(bundleID)) continue;
+        const result = {bundleID, recognizedBundle: runningKind(app) === kind};
         if (!app.bundleURL.isNil()) {
             const bundle = $.NSBundle.bundleWithURL(app.bundleURL);
             result.version = ObjC.unwrap(bundle.objectForInfoDictionaryKey('CFBundleShortVersionString'));
         }
-        zoomApps.push(result);
+        apps.push(result);
         if (!appControl) continue;
         try {
             const axApp = $.AXUIElementCreateApplication(app.processIdentifier);
@@ -116,19 +125,66 @@ function diagnoseZoom() {
             const focusedWindow = result.recognizedBundle ? attribute(axApp, 'AXFocusedWindow') : null;
             result.windows = elements(attribute(axApp, 'AXWindows')).map(window => {
                 try {
-                    return {...zoomWindowReport(window, result.recognizedBundle ? axApp : null),
-                        focused: focusedWindow !== null && $.CFEqual(focusedWindow, window)};
+                    const report = zoom
+                        ? zoomWindowReport(window, result.recognizedBundle ? axApp : null)
+                        : teamsWindowReport(window);
+                    return {...report, focused: focusedWindow !== null && $.CFEqual(focusedWindow, window)};
                 } catch (error) {
                     return {error: error.message};
                 }
             });
-            if (result.recognizedBundle) result.meetingMenu = zoomMenuReport(axApp);
+            if (zoom && result.recognizedBundle) result.meetingMenu = zoomMenuReport(axApp);
         } catch (error) {
             result.error = error.message;
         }
     }
     const macOS = ObjC.unwrap($.NSProcessInfo.processInfo.operatingSystemVersionString);
-    return JSON.stringify({macOS, appControl, zoomApps});
+    return JSON.stringify({macOS, appControl, [zoom ? 'zoomApps' : 'teamsApps']: apps});
+}
+
+/** @param {object} window Teams AXUIElement */
+function teamsWindowReport(window) {
+    const report = {
+        recognized: null,
+        subrole: ObjC.unwrap(attribute(window, 'AXSubrole')),
+        minimized: ObjC.unwrap(attribute(window, 'AXMinimized')),
+        main: ObjC.unwrap(attribute(window, 'AXMain')),
+        roles: Object.create(null),
+        controls: [],
+    };
+    try {
+        report.recognized = isMeetingWindow(window, 'Teams');
+    } catch (error) {
+        report.detectionError = error.message;
+    }
+    const knownLabels = [...Object.values(labels.Teams).flat(), 'leave', 'end call', 'join now', 'meeting controls',
+        'mute', 'unmute', 'turn on microphone', 'turn off microphone', 'turn on camera', 'turn off camera'];
+    const knownID = /^(?:hangup|leave|end|mute|unmute|microphone|mic|camera|video|audio|call|calling|meeting)(?:[-_.](?:button|toggle|menu|controls?|toolbar|call|meeting|mic|microphone|camera|video|audio))*$/i;
+    const shortcutHint = /\s+\((?:(?:ctrl|control|alt|option|shift|cmd|command|[⌘⌃⌥⇧])\s*\+?\s*)+[a-z0-9]\)$/i;
+    try {
+        for (const item of windowElements(window, 'Teams')) {
+            const role = ObjC.unwrap(attribute(item, 'AXRole'));
+            if (role) report.roles[role] = (report.roles[role] || 0) + 1;
+            if (!buttonRoles.includes(role) && !['AXGroup', 'AXToolbar', 'AXMenuItem'].includes(role)) continue;
+            const control = {role};
+            for (const field of ['AXDOMIdentifier', 'AXIdentifier']) {
+                const id = ObjC.unwrap(attribute(item, field));
+                if (typeof id === 'string' && knownID.test(id)) control[field] = id;
+            }
+            for (const field of ['AXTitle', 'AXDescription', 'AXHelp']) {
+                const label = ObjC.unwrap(attribute(item, field));
+                if (typeof label === 'string' && labelMatches(label.trim().replace(shortcutHint, ''), knownLabels)) {
+                    control[field] = label;
+                }
+            }
+            if (Object.keys(control).length > 1) {
+                report.controls.push({...control, enabled: ObjC.unwrap(attribute(item, 'AXEnabled'))});
+            }
+        }
+    } catch (error) {
+        report.scanError = error.message;
+    }
+    return report;
 }
 
 /** @param {object} window Zoom AXUIElement @param {object|null} [axApp] */
@@ -200,11 +256,12 @@ function runningKind(app) {
     return appKind(bundleID, startURL);
 }
 
-/** @param {number[]} ownerPIDs @param {number} frontPID @param {object[]} [zoomMisses] */
-function chooseMeeting(ownerPIDs, frontPID, zoomMisses = []) {
+/** @param {number[]} ownerPIDs @param {number} frontPID @param {{zoom: object[], teams: object[]}} [diagnostics] */
+function chooseMeeting(ownerPIDs, frontPID, diagnostics = {zoom: [], teams: []}) {
     if (!ownerPIDs.length) {
-        const details = zoomMisses.length ? ` Zoom detection: ${JSON.stringify(zoomMisses)}` : '';
-        throw new Error(`No supported in-call window found. Join a meeting in the installed Meet app, Teams, or Zoom.${details}`);
+        const zoom = diagnostics.zoom?.length ? ` Zoom detection: ${JSON.stringify(diagnostics.zoom)}` : '';
+        const teams = diagnostics.teams?.length ? ` Teams accessibility requests: ${JSON.stringify(diagnostics.teams)}` : '';
+        throw new Error(`No supported in-call window found. Join a meeting in the installed Meet app, Teams, or Zoom.${zoom}${teams}`);
     }
     if (ownerPIDs.length === 1) return 0;
     const frontIndex = ownerPIDs.indexOf(frontPID);
@@ -231,17 +288,55 @@ function elements(array) {
     return Array.from({length: array ? array.count : 0}, (_, index) => array.objectAtIndex(index));
 }
 
-/** @param {{app: object, kind: string}} candidate @param {object[]} zoomMisses */
-function meetingWindows({app, kind}, zoomMisses) {
+/** @param {{app: object, kind: string}} candidate @param {{zoom: object[], teams: object[]}} diagnostics */
+function meetingWindows({app, kind}, diagnostics) {
     const pid = app.processIdentifier;
     const axApp = $.AXUIElementCreateApplication(pid);
     checkAX($.AXUIElementSetMessagingTimeout(axApp, 1), 'set an Accessibility timeout');
     attribute(axApp, 'AXRole'); // Chrome's web app shim enables web accessibility on this query.
+    if (kind === 'Teams') {
+        return teamsMeetingWindows(axApp, diagnostics.teams).map(window => ({app, kind, pid, axApp, window}));
+    }
     const windows = elements(attribute(axApp, 'AXWindows'));
-    if (kind === 'Zoom' && !windows.length) zoomMisses.push({reason: 'no-windows'});
+    if (kind === 'Zoom' && !windows.length) diagnostics.zoom.push({reason: 'no-windows'});
     return windows
-        .filter(window => isMeetingWindow(window, kind, axApp, zoomMisses))
+        .filter(window => isMeetingWindow(window, kind, axApp, diagnostics.zoom))
         .map(window => ({app, kind, pid, axApp, window}));
+}
+
+/** @param {object} axApp Teams AXUIElement @param {object[]} requests */
+function teamsMeetingWindows(axApp, requests) {
+    const windows = () => elements(attribute(axApp, 'AXWindows'));
+    const current = windows();
+    let matches = current.filter(window => isMeetingWindow(window, 'Teams'));
+    if (matches.length || !current.some(window =>
+        ObjC.unwrap(attribute(window, 'AXSubrole')) === 'AXStandardWindow' && !hasTeamsWebContent(window))) return matches;
+
+    const result = {};
+    requests.push(result);
+    // Teams may publish its web tree after these hints even when it rejects the attributes.
+    for (const field of ['AXManualAccessibility', 'AXEnhancedUserInterface']) {
+        const code = $.AXUIElementSetAttributeValue(axApp, $(field), $(true));
+        result[field] = code;
+        if (code === 0) break;
+        if (code !== Number($.kAXErrorAttributeUnsupported) && code !== Number($.kAXErrorNotImplemented)) {
+            checkAX(code, `request Teams web accessibility with ${field}`);
+        }
+    }
+    waitFor(() => {
+        matches = windows().filter(window => isMeetingWindow(window, 'Teams'));
+        return matches.length > 0;
+    }, 3000);
+    return matches;
+}
+
+/** @param {object} window Teams window AXUIElement */
+function hasTeamsWebContent(window) {
+    for (const item of windowElements(window, 'Teams')) {
+        if (ObjC.unwrap(attribute(item, 'AXRole')) === 'AXWebArea' &&
+            elements(attribute(item, 'AXChildren')).length) return true;
+    }
+    return false;
 }
 
 /** @param {object} window AXUIElement @param {string} kind @param {object|null} [axApp] @param {object[]|null} [zoomMisses] */
@@ -302,11 +397,14 @@ function* windowElements(window, kind) {
 function mediaControls(target) {
     const matches = {mute: [], unmute: [], 'camera-on': [], 'camera-off': []};
     const zoom = target.kind === 'Zoom';
+    const teams = target.kind === 'Teams';
     const available = zoom ? zoomMenuItems(target.axApp) : windowElements(target.window, target.kind);
     const roles = zoom ? ['AXMenuItem'] : buttonRoles;
     for (const element of available) {
         if (!roles.includes(ObjC.unwrap(attribute(element, 'AXRole')))) continue;
+        const id = teams ? ObjC.unwrap(attribute(element, 'AXDOMIdentifier')) : null;
         for (const key of Object.keys(matches)) {
+            if (teams && id !== teamsMediaIDs[key]) continue;
             if (elementMatches(element, labels[target.kind][key])
                 && !matches[key].some(match => $.CFEqual(match, element))) matches[key].push(element);
         }
@@ -373,16 +471,19 @@ function setControl(target, controls, action) {
         return `Already set: ${action}.`;
     }
     const options = labels[target.kind];
-    if (!elementMatches(button, options[action]) || elementMatches(button, options[opposite])) {
-        throw new Error('The meeting control changed before it could be pressed. No press sent.');
+    const teams = target.kind === 'Teams';
+    if ((teams && ObjC.unwrap(attribute(button, 'AXDOMIdentifier')) !== teamsMediaIDs[action]) ||
+        !elementMatches(button, options[action]) || elementMatches(button, options[opposite])) {
+        throw new Error('The meeting control changed before it could be activated. No action sent.');
     }
-    if (target.kind === 'Meet') {
-        sendMeetShortcut(workspace, target, action);
+    const usesShortcut = teams || target.kind === 'Meet';
+    if (usesShortcut) {
+        sendMeetingShortcut(workspace, target, action);
     } else {
         checkAX($.AXUIElementPerformAction(button, $('AXPress')), 'press the requested meeting control');
     }
 
-    const sent = target.kind === 'Meet' ? 'Sent the Meet shortcut' : 'Pressed the meeting control';
+    const sent = usesShortcut ? `Sent the ${target.kind} shortcut` : 'Pressed the meeting control';
     const failure = `${sent}, but could not confirm the requested state. Check the app before trying again.`;
     try {
         if (waitFor(() => {
@@ -396,16 +497,19 @@ function setControl(target, controls, action) {
     throw new Error(failure);
 }
 
-/** @param {object} workspace NSWorkspace @param {object} target Selected Meet app and window @param {string} action */
-function sendMeetShortcut(workspace, target, action) {
-    // Chromium can accept AXPress without activating the web button. Use Meet's shortcut after checking its state.
-    const key = action === 'mute' || action === 'unmute' ? $.kVK_ANSI_D : $.kVK_ANSI_E;
+/** @param {object} workspace NSWorkspace @param {object} target Selected meeting app and window @param {string} action */
+function sendMeetingShortcut(workspace, target, action) {
+    // Chromium can accept AXPress without activating the web button.
+    const teams = target.kind === 'Teams';
+    const [micKey, cameraKey] = teams ? [$.kVK_ANSI_M, $.kVK_ANSI_O] : [$.kVK_ANSI_D, $.kVK_ANSI_E];
+    const key = action === 'mute' || action === 'unmute' ? micKey : cameraKey;
+    const flags = Number($.kCGEventFlagMaskCommand) | (teams ? Number($.kCGEventFlagMaskShift) : 0);
     const down = $.CGEventCreateKeyboardEvent(null, Number(key), true);
     const up = $.CGEventCreateKeyboardEvent(null, Number(key), false);
-    if (!down || !up) throw new Error('Could not create the Meet shortcut. No key sent.');
-    $.CGEventSetFlags(down, Number($.kCGEventFlagMaskCommand));
-    $.CGEventSetFlags(up, Number($.kCGEventFlagMaskCommand));
-    if (!focused(workspace, target)) throw new Error('Focus changed before sending the Meet shortcut. No key sent.');
+    if (!down || !up) throw new Error(`Could not create the ${target.kind} shortcut. No key sent.`);
+    $.CGEventSetFlags(down, flags);
+    $.CGEventSetFlags(up, flags);
+    if (!focused(workspace, target)) throw new Error(`Focus changed before sending the ${target.kind} shortcut. No key sent.`);
     $.CGEventPostToPid(target.pid, down);
     $.CGEventPostToPid(target.pid, up);
 }

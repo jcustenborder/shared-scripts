@@ -33,6 +33,7 @@ function run() {
     expect(labelMatches('Unmute mic', ['mute mic']), false, 'never confuse inverse actions');
     expect(labelMatches('Leave (not a shortcut ⌘)', ['leave']), false, 'ignore unrelated labels');
     expect(requestedAction(['diagnose-zoom']), 'diagnose-zoom', 'accept the read-only Zoom diagnostic');
+    expect(requestedAction(['diagnose-teams']), 'diagnose-teams', 'accept the read-only Teams diagnostic');
     for (const args of [[], ['invalid'], ['mute', 'exit']]) refuses(() => requestedAction(args), 'Usage:');
 
     const chrome = {bundleIdentifier: $('com.google.Chrome'), get terminate() {
@@ -40,8 +41,9 @@ function run() {
     }};
     refuses(() => quitMeeting(chrome, 'Meet'), 'No quit sent');
     testMeetingLock();
+    testTeamsWebAccessibility();
     testControlScope();
-    testMeetMediaActions();
+    testMediaShortcuts();
     return 'Meeting decision tests passed.';
 }
 
@@ -80,6 +82,22 @@ function testControlScope() {
         refuses(() => chooseMeeting(eligible, 999), 'Multiple');
         expect(isMeetingWindow(idle, 'Teams'), false, 'a generic Leave button can belong to a team, not a call');
         expect(isMeetingWindow({...idle, AXDOMIdentifier: 'hangup-button'}, 'Teams'), true, 'Teams hangup control proves a call');
+        const teams = teamsWindowReport({
+            AXRole: 'AXWindow', AXTitle: 'Private meeting title', AXMain: true, AXChildren: [{
+                AXRole: 'AXWebArea', AXChildren: [
+                    {AXRole: 'AXButton', AXTitle: 'Mute Private Person', AXDOMIdentifier: 'mute-private-person'},
+                    {AXRole: 'AXButton', AXTitle: 'Leave (Cmd+Shift+H)', AXDOMIdentifier: 'hangup-button', AXEnabled: true},
+                    {AXRole: 'AXButton', AXDescription: 'Turn on camera', AXDOMIdentifier: 'camera-button', AXEnabled: false},
+                ],
+            }],
+        });
+        expect(teams.recognized, true, 'diagnose the same Teams call marker as the shortcut');
+        expect(teams.roles.AXWebArea, 1, 'report whether the Teams web view is exposed');
+        expect(JSON.stringify(teams.controls), JSON.stringify([
+            {role: 'AXButton', AXDOMIdentifier: 'camera-button', AXDescription: 'Turn on camera', enabled: false},
+            {role: 'AXButton', AXDOMIdentifier: 'hangup-button', AXTitle: 'Leave (Cmd+Shift+H)', enabled: true},
+        ]), 'report safe Teams control labels, identifiers, and enabled state');
+        expect(JSON.stringify(teams).includes('Private'), false, 'omit private Teams content from the report');
 
         const participant = {AXRole: 'AXButton', AXTitle: 'Stop video'};
         const ownCamera = {AXRole: 'AXMenuItem', AXTitle: 'Start video', AXEnabled: true};
@@ -146,7 +164,7 @@ function testControlScope() {
         expect(JSON.stringify(layoutMisses),
             JSON.stringify([{reason: 'layout', buttons: 4, tabGroups: 1, otherRoles: ['AXGroup']}]),
             'capture the rejected structure without including the meeting title');
-        refuses(() => chooseMeeting([], 999, layoutMisses), 'Zoom detection: [{"reason":"layout"');
+        refuses(() => chooseMeeting([], 999, {zoom: layoutMisses}), 'Zoom detection: [{"reason":"layout"');
         expect(isMeetingWindow(call, 'Zoom', {}), false, 'the window structure alone does not prove a call');
         mute.AXEnabled = false;
         const menuMisses = [];
@@ -163,17 +181,73 @@ function testControlScope() {
     }
 }
 
-function testMeetMediaActions() {
+function testTeamsWebAccessibility() {
+    const savedAttribute = attribute;
+    const savedCreate = $.AXUIElementCreateApplication;
+    const savedTimeout = $.AXUIElementSetMessagingTimeout;
+    const savedSet = $.AXUIElementSetAttributeValue;
+    const savedWait = waitFor;
+    const coldWindow = {AXRole: 'AXWindow', AXSubrole: 'AXStandardWindow'};
+    const readyWindow = {...coldWindow, AXChildren: [{AXRole: 'AXWebArea', AXChildren: [
+        {AXRole: 'AXButton', AXDOMIdentifier: 'hangup-button'},
+    ]}]};
+    const app = {AXWindows: [coldWindow]};
+    const diagnostics = {zoom: [], teams: []};
+    const scan = () => meetingWindows({app: {processIdentifier: 123}, kind: 'Teams'}, diagnostics);
+    const requests = [];
+    let publishWebView = true;
+    attribute = (node, key) => {
+        const value = node[key];
+        return Array.isArray(value) ? {count: value.length, objectAtIndex: index => value[index]} : value ?? null;
+    };
+    $.AXUIElementCreateApplication = () => app;
+    $.AXUIElementSetMessagingTimeout = () => 0;
+    $.AXUIElementSetAttributeValue = (target, name, value) => {
+        expect(target, app, 'scope the accessibility request to Teams');
+        expect(ObjC.unwrap(value), true, 'request accessibility, never turn it off');
+        const field = ObjC.unwrap(name);
+        requests.push(field);
+        return field === 'AXManualAccessibility' ? Number($.kAXErrorAttributeUnsupported) : Number($.kAXErrorNotImplemented);
+    };
+    waitFor = condition => {
+        if (condition()) return true;
+        if (publishWebView && requests.includes('AXEnhancedUserInterface')) app.AXWindows = [readyWindow];
+        return condition();
+    };
+    try {
+        expect(scan()[0]?.window, readyWindow,
+            'reread Teams windows and verify the call when the web view appears after the request');
+        expect(JSON.stringify(requests), JSON.stringify(['AXManualAccessibility', 'AXEnhancedUserInterface']),
+            'try the Teams fallback even when manual accessibility is unsupported');
+        scan();
+        app.AXWindows = [{...coldWindow, AXChildren: [{AXRole: 'AXWebArea', AXChildren: [{AXRole: 'AXStaticText'}]}]}];
+        expect(scan().length, 0, 'never treat the populated Teams home window as a call');
+        expect(requests.length, 2, 'no accessibility write when the web view is already populated');
+        publishWebView = false;
+        app.AXWindows = [coldWindow];
+        expect(scan().length, 0, 'refuse the call if the web view stays missing');
+        refuses(() => chooseMeeting([], 999, diagnostics), '"AXEnhancedUserInterface":-25208');
+    } finally {
+        attribute = savedAttribute;
+        $.AXUIElementCreateApplication = savedCreate;
+        $.AXUIElementSetMessagingTimeout = savedTimeout;
+        $.AXUIElementSetAttributeValue = savedSet;
+        waitFor = savedWait;
+    }
+}
+
+function testMediaShortcuts() {
     const savedAttribute = attribute;
     const savedFocused = focused;
     const savedPress = $.AXUIElementPerformAction;
     const savedPost = $.CGEventPostToPid;
     const target = {kind: 'Meet', pid: 123, window: {}};
     const button = {AXRole: 'AXButton', AXEnabled: true};
+    const nodes = [button];
     const events = [];
     let newTitle;
     attribute = (node, key) => node === target.window && key === 'AXChildren'
-        ? {count: 1, objectAtIndex: () => button}
+        ? {count: nodes.length, objectAtIndex: index => nodes[index]}
         : node[key] ?? null;
     focused = () => true;
     $.AXUIElementPerformAction = () => 0; // Reproduce the accepted press with no state change.
@@ -184,24 +258,33 @@ function testMeetMediaActions() {
         if (type === Number($.kCGEventKeyDown)) button.AXTitle = newTitle;
     };
     try {
-        for (const [action, before, after, keyCode] of [
-            ['mute', 'Turn off microphone', 'Turn on microphone', 2],
-            ['unmute', 'Turn on microphone', 'Turn off microphone', 2],
-            ['camera-off', 'Turn off camera', 'Turn on camera', 14],
-            ['camera-on', 'Turn on camera', 'Turn off camera', 14],
+        for (const [kind, action, before, after, keyCode, id] of [
+            ['Meet', 'mute', 'Turn off microphone', 'Turn on microphone', 2],
+            ['Meet', 'unmute', 'Turn on microphone', 'Turn off microphone', 2],
+            ['Meet', 'camera-off', 'Turn off camera', 'Turn on camera', 14],
+            ['Meet', 'camera-on', 'Turn on camera', 'Turn off camera', 14],
+            ['Teams', 'mute', 'Mute mic', 'Unmute mic', 46, 'microphone-button'],
+            ['Teams', 'unmute', 'Unmute mic', 'Mute mic', 46, 'microphone-button'],
+            ['Teams', 'camera-off', 'Turn camera off', 'Turn camera on', 31, 'video-button'],
+            ['Teams', 'camera-on', 'Turn camera on', 'Turn camera off', 31, 'video-button'],
         ]) {
             events.length = 0;
             newTitle = after;
+            target.kind = kind;
+            button.AXDOMIdentifier = id;
             button.AXTitle = before;
-            expect(setControl(target, mediaControls(target), action), `Set: ${action}.`, 'confirm changed Meet state');
+            expect(setControl(target, mediaControls(target), action), `Set: ${action}.`, `confirm changed ${kind} state`);
             expect(setControl(target, mediaControls(target), action), `Already set: ${action}.`, 'do not toggle twice');
-            const command = Number($.kCGEventFlagMaskCommand);
-            expect(JSON.stringify(events), JSON.stringify([[123, 10, keyCode, command], [123, 11, keyCode, command]]),
-                'send one Command shortcut to the Meet PID only');
+            const flags = Number($.kCGEventFlagMaskCommand) | (kind === 'Teams' ? Number($.kCGEventFlagMaskShift) : 0);
+            expect(JSON.stringify(events), JSON.stringify([[123, 10, keyCode, flags], [123, 11, keyCode, flags]]),
+                `send one ${kind} shortcut to the meeting PID only`);
         }
         events.length = 0;
-        button.AXTitle = 'Turn off microphone';
+        nodes.push({AXRole: 'AXButton', AXTitle: 'Unmute mic', AXEnabled: true});
+        button.AXDOMIdentifier = 'microphone-button';
+        button.AXTitle = 'Mute mic';
         const controls = mediaControls(target);
+        expect(controls.unmute.length, 0, 'ignore a Teams control without the own-mic identifier');
         const ambiguous = {...controls, mute: [button, button]};
         refuses(() => setControl(target, ambiguous, 'mute'), 'unique');
         let focusChecks = 0;

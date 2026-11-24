@@ -47,8 +47,9 @@ In **System Settings → Privacy & Security**, enable the launcher you use, not 
 
 - The script prefers a verified call in the frontmost supported app. If nothing is recognized there, it looks for a single recognized call elsewhere. If several qualify, bring the intended app forward or close the extra meeting windows.
 - Zoom call detection does not use window titles. When there is no accessible leave button, it also accepts the observed Zoom 7.1.9 main-window layout with enabled, unambiguous mic and camera commands in Zoom's **Meeting** menu. Other window layouts without a leave button are not recognized.
+- When Teams hasn't exposed its web controls, the shortcut asks Teams to enable web accessibility and checks again. This doesn't enable VoiceOver or change macOS settings. The shortcut still requires a verified call before it acts.
 - Mic and camera actions leave an already-correct state alone. If two shortcuts overlap, the second one is refused rather than risking a double toggle. The first version uses English accessibility labels; Zoom's mic and camera actions use its **Meeting** menu, not the participant controls. If the script cannot recognize a control or it is disabled, use the app's own controls rather than retrying blindly.
-- After checking the current state, the installed Meet app gets its built-in ⌘D (mic) or ⌘E (camera) shortcut directly. The script checks the resulting state and does not retry the keypress.
+- After checking the current state, the script sends the app's default shortcut directly: ⌘D (mic) or ⌘E (camera) for Meet, and ⌘⇧M (mic) or ⌘⇧O (camera) for Teams. It checks the resulting state and does not retry the keypress.
 - `exit` requests a normal quit of the selected meeting app. It may close other windows owned by that app or show its usual confirmation. It does not click an **End for everyone** button, force quit, or send `⌘Q`. For Meet, it targets only the installed web app, never the Chrome browser or its tabs.
 
 ## Verify on a new Mac
@@ -61,7 +62,13 @@ If a Zoom call isn't detected, check the `Zoom detection:` details in the error.
 /usr/bin/osascript apple/meeting.applescript diagnose-zoom
 ```
 
-This reports app-control permission, running Zoom apps, window structure, and known call controls without changing focus or clicking anything. It does not print meeting titles. If `appControl` is `false`, grant Terminal app-control permission or run the same action from a launcher that already has it.
+For Microsoft Teams, run this while the call is open:
+
+```sh
+/usr/bin/osascript apple/meeting.applescript diagnose-teams
+```
+
+These commands report app-control permission, running apps, window structure, and known call controls without changing focus or clicking anything. They do not print meeting titles. If `appControl` is `false`, grant Terminal app-control permission or run the same action from a launcher that already has it.
 
 For the automated decision tests (no meeting needed), run from the repository root:
 
