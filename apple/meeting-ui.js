@@ -74,14 +74,14 @@ function runAction(action) {
         throw new Error('Enable Accessibility for the app running the shortcut in System Settings → Privacy & Security.');
     }
 
-    const zoomMisses = [];
+    const diagnostics = {zoom: [], teams: []};
     const foreground = candidates.find(({app}) => app.processIdentifier === frontPID);
-    let meetings = foreground ? meetingWindows(foreground, zoomMisses) : [];
+    let meetings = foreground ? meetingWindows(foreground, diagnostics) : [];
     if (!meetings.length) {
         meetings = candidates.filter(candidate => candidate !== foreground)
-            .flatMap(candidate => meetingWindows(candidate, zoomMisses));
+            .flatMap(candidate => meetingWindows(candidate, diagnostics));
     }
-    const target = meetings[chooseMeeting(meetings.map(({pid}) => pid), frontPID, zoomMisses)];
+    const target = meetings[chooseMeeting(meetings.map(({pid}) => pid), frontPID, diagnostics)];
     focusWindow(workspace, target);
     if (!isMeetingWindow(target.window, target.kind, target.axApp) || !focused(workspace, target)) {
         throw new Error('The selected call or focus changed before the meeting action.');
@@ -253,11 +253,12 @@ function runningKind(app) {
     return appKind(bundleID, startURL);
 }
 
-/** @param {number[]} ownerPIDs @param {number} frontPID @param {object[]} [zoomMisses] */
-function chooseMeeting(ownerPIDs, frontPID, zoomMisses = []) {
+/** @param {number[]} ownerPIDs @param {number} frontPID @param {{zoom: object[], teams: object[]}} [diagnostics] */
+function chooseMeeting(ownerPIDs, frontPID, diagnostics = {zoom: [], teams: []}) {
     if (!ownerPIDs.length) {
-        const details = zoomMisses.length ? ` Zoom detection: ${JSON.stringify(zoomMisses)}` : '';
-        throw new Error(`No supported in-call window found. Join a meeting in the installed Meet app, Teams, or Zoom.${details}`);
+        const zoom = diagnostics.zoom?.length ? ` Zoom detection: ${JSON.stringify(diagnostics.zoom)}` : '';
+        const teams = diagnostics.teams?.length ? ` Teams accessibility requests: ${JSON.stringify(diagnostics.teams)}` : '';
+        throw new Error(`No supported in-call window found. Join a meeting in the installed Meet app, Teams, or Zoom.${zoom}${teams}`);
     }
     if (ownerPIDs.length === 1) return 0;
     const frontIndex = ownerPIDs.indexOf(frontPID);
@@ -284,17 +285,55 @@ function elements(array) {
     return Array.from({length: array ? array.count : 0}, (_, index) => array.objectAtIndex(index));
 }
 
-/** @param {{app: object, kind: string}} candidate @param {object[]} zoomMisses */
-function meetingWindows({app, kind}, zoomMisses) {
+/** @param {{app: object, kind: string}} candidate @param {{zoom: object[], teams: object[]}} diagnostics */
+function meetingWindows({app, kind}, diagnostics) {
     const pid = app.processIdentifier;
     const axApp = $.AXUIElementCreateApplication(pid);
     checkAX($.AXUIElementSetMessagingTimeout(axApp, 1), 'set an Accessibility timeout');
     attribute(axApp, 'AXRole'); // Chrome's web app shim enables web accessibility on this query.
+    if (kind === 'Teams') {
+        return teamsMeetingWindows(axApp, diagnostics.teams).map(window => ({app, kind, pid, axApp, window}));
+    }
     const windows = elements(attribute(axApp, 'AXWindows'));
-    if (kind === 'Zoom' && !windows.length) zoomMisses.push({reason: 'no-windows'});
+    if (kind === 'Zoom' && !windows.length) diagnostics.zoom.push({reason: 'no-windows'});
     return windows
-        .filter(window => isMeetingWindow(window, kind, axApp, zoomMisses))
+        .filter(window => isMeetingWindow(window, kind, axApp, diagnostics.zoom))
         .map(window => ({app, kind, pid, axApp, window}));
+}
+
+/** @param {object} axApp Teams AXUIElement @param {object[]} requests */
+function teamsMeetingWindows(axApp, requests) {
+    const windows = () => elements(attribute(axApp, 'AXWindows'));
+    const current = windows();
+    let matches = current.filter(window => isMeetingWindow(window, 'Teams'));
+    if (matches.length || !current.some(window =>
+        ObjC.unwrap(attribute(window, 'AXSubrole')) === 'AXStandardWindow' && !hasTeamsWebContent(window))) return matches;
+
+    const result = {};
+    requests.push(result);
+    // Teams may publish its web tree after these hints even when it rejects the attributes.
+    for (const field of ['AXManualAccessibility', 'AXEnhancedUserInterface']) {
+        const code = $.AXUIElementSetAttributeValue(axApp, $(field), $(true));
+        result[field] = code;
+        if (code === 0) break;
+        if (code !== Number($.kAXErrorAttributeUnsupported) && code !== Number($.kAXErrorNotImplemented)) {
+            checkAX(code, `request Teams web accessibility with ${field}`);
+        }
+    }
+    waitFor(() => {
+        matches = windows().filter(window => isMeetingWindow(window, 'Teams'));
+        return matches.length > 0;
+    }, 3000);
+    return matches;
+}
+
+/** @param {object} window Teams window AXUIElement */
+function hasTeamsWebContent(window) {
+    for (const item of windowElements(window, 'Teams')) {
+        if (ObjC.unwrap(attribute(item, 'AXRole')) === 'AXWebArea' &&
+            elements(attribute(item, 'AXChildren')).length) return true;
+    }
+    return false;
 }
 
 /** @param {object} window AXUIElement @param {string} kind @param {object|null} [axApp] @param {object[]|null} [zoomMisses] */

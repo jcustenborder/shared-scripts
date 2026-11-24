@@ -41,6 +41,7 @@ function run() {
     }};
     refuses(() => quitMeeting(chrome, 'Meet'), 'No quit sent');
     testMeetingLock();
+    testTeamsWebAccessibility();
     testControlScope();
     testMeetMediaActions();
     return 'Meeting decision tests passed.';
@@ -163,7 +164,7 @@ function testControlScope() {
         expect(JSON.stringify(layoutMisses),
             JSON.stringify([{reason: 'layout', buttons: 4, tabGroups: 1, otherRoles: ['AXGroup']}]),
             'capture the rejected structure without including the meeting title');
-        refuses(() => chooseMeeting([], 999, layoutMisses), 'Zoom detection: [{"reason":"layout"');
+        refuses(() => chooseMeeting([], 999, {zoom: layoutMisses}), 'Zoom detection: [{"reason":"layout"');
         expect(isMeetingWindow(call, 'Zoom', {}), false, 'the window structure alone does not prove a call');
         mute.AXEnabled = false;
         const menuMisses = [];
@@ -177,6 +178,61 @@ function testControlScope() {
         expect(isMeetingWindow(call, 'Zoom', zoom.axApp), false, 'refuse contradictory Zoom menu controls');
     } finally {
         attribute = savedAttribute;
+    }
+}
+
+function testTeamsWebAccessibility() {
+    const savedAttribute = attribute;
+    const savedCreate = $.AXUIElementCreateApplication;
+    const savedTimeout = $.AXUIElementSetMessagingTimeout;
+    const savedSet = $.AXUIElementSetAttributeValue;
+    const savedWait = waitFor;
+    const coldWindow = {AXRole: 'AXWindow', AXSubrole: 'AXStandardWindow'};
+    const readyWindow = {...coldWindow, AXChildren: [{AXRole: 'AXWebArea', AXChildren: [
+        {AXRole: 'AXButton', AXDOMIdentifier: 'hangup-button'},
+    ]}]};
+    const app = {AXWindows: [coldWindow]};
+    const diagnostics = {zoom: [], teams: []};
+    const scan = () => meetingWindows({app: {processIdentifier: 123}, kind: 'Teams'}, diagnostics);
+    const requests = [];
+    let publishWebView = true;
+    attribute = (node, key) => {
+        const value = node[key];
+        return Array.isArray(value) ? {count: value.length, objectAtIndex: index => value[index]} : value ?? null;
+    };
+    $.AXUIElementCreateApplication = () => app;
+    $.AXUIElementSetMessagingTimeout = () => 0;
+    $.AXUIElementSetAttributeValue = (target, name, value) => {
+        expect(target, app, 'scope the accessibility request to Teams');
+        expect(ObjC.unwrap(value), true, 'request accessibility, never turn it off');
+        const field = ObjC.unwrap(name);
+        requests.push(field);
+        return field === 'AXManualAccessibility' ? Number($.kAXErrorAttributeUnsupported) : Number($.kAXErrorNotImplemented);
+    };
+    waitFor = condition => {
+        if (condition()) return true;
+        if (publishWebView && requests.includes('AXEnhancedUserInterface')) app.AXWindows = [readyWindow];
+        return condition();
+    };
+    try {
+        expect(scan()[0]?.window, readyWindow,
+            'reread Teams windows and verify the call when the web view appears after the request');
+        expect(JSON.stringify(requests), JSON.stringify(['AXManualAccessibility', 'AXEnhancedUserInterface']),
+            'try the Teams fallback even when manual accessibility is unsupported');
+        scan();
+        app.AXWindows = [{...coldWindow, AXChildren: [{AXRole: 'AXWebArea', AXChildren: [{AXRole: 'AXStaticText'}]}]}];
+        expect(scan().length, 0, 'never treat the populated Teams home window as a call');
+        expect(requests.length, 2, 'no accessibility write when the web view is already populated');
+        publishWebView = false;
+        app.AXWindows = [coldWindow];
+        expect(scan().length, 0, 'refuse the call if the web view stays missing');
+        refuses(() => chooseMeeting([], 999, diagnostics), '"AXEnhancedUserInterface":-25208');
+    } finally {
+        attribute = savedAttribute;
+        $.AXUIElementCreateApplication = savedCreate;
+        $.AXUIElementSetMessagingTimeout = savedTimeout;
+        $.AXUIElementSetAttributeValue = savedSet;
+        waitFor = savedWait;
     }
 }
 
