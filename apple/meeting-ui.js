@@ -349,11 +349,13 @@ function isMeetingWindow(window, kind, axApp = null, zoomMisses = null) {
         if (kind === 'Teams' && ObjC.unwrap(attribute(element, 'AXDOMIdentifier')) === 'hangup-button') return true;
         if (elementMatches(element, labels[kind].leave)) return true;
     }
-    // shortcut: match the observed Zoom layout apart from changing static text; prefer a stable identifier if Zoom exposes one.
+    // shortcut: recognize observed Zoom layouts until Zoom exposes a stable meeting-window identifier.
     if (!zoomRoles) return false;
     const buttons = zoomRoles.filter(role => role === 'AXButton').length;
     const tabGroups = zoomRoles.filter(role => role === 'AXTabGroup').length;
-    if (zoomRoles.length !== 5 || buttons !== 4 || tabGroups !== 1) {
+    const compactLayout = zoomRoles.length === 5 && buttons === 4 && tabGroups === 1;
+    const expandedLayout = tabGroups > 1 && zoomRoles.includes('AXSplitter') && zoomRoles.includes('AXImage');
+    if (!compactLayout && !expandedLayout) {
         const otherRoles = [...new Set(zoomRoles.filter(role => role !== 'AXButton' && role !== 'AXTabGroup'))];
         zoomMisses?.push({reason: 'layout', buttons, tabGroups, otherRoles});
         return false;

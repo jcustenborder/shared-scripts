@@ -155,6 +155,35 @@ function testControlScope() {
         expect(isMeetingWindow({...call, AXChildren: [...call.AXChildren, {AXRole: 'AXStaticText'}]}, 'Zoom', zoom.axApp),
             true, 'static text does not disqualify a verified Zoom call');
         expect(zoomWindowReport(call, zoom.axApp).recognized, true, 'diagnostics use the same call detection');
+        /** @param {number} count @param {string} role */
+        const nodes = (count, role) => Array.from({length: count}, () => ({AXRole: role}));
+        const expandedCall = {...call, AXChildren: [
+            ...nodes(9, 'AXButton'), ...nodes(6, 'AXTabGroup'), ...nodes(4, 'AXImage'),
+            {AXRole: 'AXSplitter'}, {AXRole: 'AXUnknown'},
+        ]};
+        expect(isMeetingWindow(expandedCall, 'Zoom', zoom.axApp), true,
+            'detect the reported Zoom call window without a leave button');
+        expect(isMeetingWindow({...expandedCall, AXChildren: [...expandedCall.AXChildren,
+            {AXRole: 'AXButton'}, tabGroup]}, 'Zoom', zoom.axApp), true,
+            'recognize the same Zoom call when its button and tab counts change');
+        expect(isMeetingWindow({...call, AXChildren: [...nodes(25, 'AXButton'), ...nodes(5, 'AXGroup'),
+            {AXRole: 'AXSplitGroup'}, {AXRole: 'AXSplitter'}, {AXRole: 'AXUnknown'}]}, 'Zoom', zoom.axApp),
+            false, 'the Zoom Workplace window is not a call even if it is main and the Meeting menu is active');
+        for (const role of ['AXSplitter', 'AXImage']) {
+            const AXChildren = expandedCall.AXChildren.filter(child => child.AXRole !== role);
+            expect(isMeetingWindow({...expandedCall, AXChildren}, 'Zoom', zoom.axApp), false,
+                `require ${role} for the expanded Zoom layout`);
+        }
+        expect(isMeetingWindow({...expandedCall, AXMain: false}, 'Zoom', zoom.axApp), false,
+            'do not target an expanded layout in a secondary Zoom window');
+        expect(isMeetingWindow({...expandedCall, AXSubrole: 'AXDialog'}, 'Zoom', zoom.axApp), false,
+            'do not target an expanded layout in a Zoom dialog');
+        expect(isMeetingWindow(expandedCall, 'Zoom', {}), false,
+            'the expanded layout alone does not prove a call');
+        ownCamera.AXEnabled = false;
+        expect(isMeetingWindow(expandedCall, 'Zoom', zoom.axApp), false,
+            'the expanded layout still requires an enabled camera command');
+        ownCamera.AXEnabled = true;
         expect(isMeetingWindow({...call, AXMain: false}, 'Zoom', zoom.axApp), false,
             'do not target a secondary window with the same shape');
         const layoutMisses = [];
