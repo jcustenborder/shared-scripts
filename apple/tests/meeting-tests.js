@@ -32,6 +32,7 @@ function run() {
     expect(labelMatches('Turn on microphone (⌘ + D)', ['turn on microphone']), true, 'accept a shortcut hint');
     expect(labelMatches('Unmute mic', ['mute mic']), false, 'never confuse inverse actions');
     expect(labelMatches('Leave (not a shortcut ⌘)', ['leave']), false, 'ignore unrelated labels');
+    expect(requestedAction(['diagnose-zoom']), 'diagnose-zoom', 'accept the read-only Zoom diagnostic');
     for (const args of [[], ['invalid'], ['mute', 'exit']]) refuses(() => requestedAction(args), 'Usage:');
 
     const chrome = {bundleIdentifier: $('com.google.Chrome'), get terminate() {
@@ -81,18 +82,82 @@ function testControlScope() {
         expect(isMeetingWindow({...idle, AXDOMIdentifier: 'hangup-button'}, 'Teams'), true, 'Teams hangup control proves a call');
 
         const participant = {AXRole: 'AXButton', AXTitle: 'Stop video'};
-        const ownCamera = {AXRole: 'AXMenuItem', AXTitle: 'Start video'};
+        const ownCamera = {AXRole: 'AXMenuItem', AXTitle: 'Start video', AXEnabled: true};
+        const privateItem = {AXRole: 'AXMenuItem', AXTitle: 'Invite Private Person', AXEnabled: true};
         const zoom = {
             kind: 'Zoom',
             window: {AXChildren: [{AXRole: 'AXButton', AXTitle: 'End meeting'}, participant]},
             axApp: {AXMenuBar: {AXChildren: [
-                {AXRole: 'AXMenuBarItem', AXTitle: 'Meeting', AXChildren: [{AXRole: 'AXMenu', AXChildren: [ownCamera]}]},
+                {AXRole: 'AXMenuBarItem', AXTitle: 'Meeting',
+                    AXChildren: [{AXRole: 'AXMenu', AXChildren: [ownCamera, privateItem]}]},
             ]}},
         };
         expect(isMeetingWindow(zoom.window, 'Zoom'), true, 'Zoom has a specific call marker');
+        expect(zoomWindowReport(zoom.window).recognized, true, 'report an existing Zoom match');
+        const unmatched = zoomWindowReport({
+            AXRole: 'AXWindow', AXTitle: 'Zoom Meeting: Private meeting title', AXIdentifier: 'ZMMeetingWindow',
+            AXMain: true, AXChildren: [
+                {AXRole: 'AXButton', AXDescription: 'End (⌘ + W)', AXIdentifier: 'Jane Smith'},
+                {AXRole: 'AXButton', AXTitle: 'Leave Jane Smith'},
+                {AXRole: 'AXTabGroup', AXDescription: 'Meeting controls'},
+            ],
+        });
+        expect(unmatched.recognized, false, 'diagnostics do not broaden Zoom detection');
+        expect(unmatched.titleKind, 'zoom meeting', 'classify a window without sharing its title');
+        expect(unmatched.roles.AXButton, 2, 'report even controls that have no known marker');
+        expect(unmatched.main, true, 'report whether Zoom considers this its main window');
+        expect(JSON.stringify(unmatched.identifiers),
+            JSON.stringify([{role: 'AXWindow', identifier: 'ZMMeetingWindow'}]),
+            'report a native-style identifier without printing arbitrary identifier text');
+        expect(JSON.stringify(unmatched.markers),
+            JSON.stringify([
+                {role: 'AXTabGroup', field: 'AXDescription', label: 'Meeting controls'},
+                {role: 'AXButton', field: 'AXDescription', label: 'End (⌘ + W)'},
+            ]),
+            'show candidate call markers without including unrelated labels');
+        expect(JSON.stringify(unmatched).includes('Private meeting title'), false, 'omit the meeting title');
+        expect(JSON.stringify(zoomMenuReport(zoom.axApp)),
+            JSON.stringify({itemCount: 2, controls: [{title: 'Start video', enabled: true}]}),
+            'diagnose Meeting menu availability and only report known control labels');
         const zoomControls = mediaControls(zoom);
         expect(zoomControls['camera-off'].length, 0, 'ignore another participant’s Stop video');
         expect(zoomControls['camera-on'][0], ownCamera, 'only use Zoom’s own Meeting menu command');
+
+        const tabGroup = {AXRole: 'AXTabGroup'};
+        const call = {AXRole: 'AXWindow', AXSubrole: 'AXStandardWindow', AXMain: true,
+            AXChildren: [{AXRole: 'AXButton'}, {AXRole: 'AXButton'}, {AXRole: 'AXButton'},
+                {AXRole: 'AXButton'}, tabGroup]};
+        const mute = {AXRole: 'AXMenuItem', AXTitle: 'Mute audio', AXEnabled: true};
+        const menu = zoom.axApp.AXMenuBar.AXChildren[0].AXChildren[0];
+        menu.AXChildren.push(mute);
+        for (const title of ['Zoom Meeting', 'Weekly sync', undefined]) {
+            expect(isMeetingWindow({...call, AXTitle: title}, 'Zoom', zoom.axApp), true,
+                'detect a verified Zoom call regardless of its title');
+        }
+        expect(isMeetingWindow({...call, AXChildren: [...call.AXChildren, {AXRole: 'AXStaticText'}]}, 'Zoom', zoom.axApp),
+            true, 'static text does not disqualify a verified Zoom call');
+        expect(zoomWindowReport(call, zoom.axApp).recognized, true, 'diagnostics use the same call detection');
+        expect(isMeetingWindow({...call, AXMain: false}, 'Zoom', zoom.axApp), false,
+            'do not target a secondary window with the same shape');
+        const layoutMisses = [];
+        expect(isMeetingWindow({...call, AXTitle: 'Private topic',
+            AXChildren: [...call.AXChildren, {AXRole: 'AXGroup'}]}, 'Zoom', zoom.axApp, layoutMisses),
+            false, 'an active menu does not qualify a window with a different structure');
+        expect(JSON.stringify(layoutMisses),
+            JSON.stringify([{reason: 'layout', buttons: 4, tabGroups: 1, otherRoles: ['AXGroup']}]),
+            'capture the rejected structure without including the meeting title');
+        refuses(() => chooseMeeting([], 999, layoutMisses), 'Zoom detection: [{"reason":"layout"');
+        expect(isMeetingWindow(call, 'Zoom', {}), false, 'the window structure alone does not prove a call');
+        mute.AXEnabled = false;
+        const menuMisses = [];
+        expect(isMeetingWindow(call, 'Zoom', zoom.axApp, menuMisses), false,
+            'a disabled microphone command does not prove a call');
+        expect(JSON.stringify(menuMisses),
+            JSON.stringify([{reason: 'menu', control: 'microphone', matches: 1, enabled: false}]),
+            'distinguish a disabled command from a missing command at the time of rejection');
+        mute.AXEnabled = true;
+        menu.AXChildren.push({...mute, AXTitle: 'Unmute audio'});
+        expect(isMeetingWindow(call, 'Zoom', zoom.axApp), false, 'refuse contradictory Zoom menu controls');
     } finally {
         attribute = savedAttribute;
     }
