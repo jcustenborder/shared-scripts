@@ -33,6 +33,7 @@ function run() {
     expect(labelMatches('Unmute mic', ['mute mic']), false, 'never confuse inverse actions');
     expect(labelMatches('Leave (not a shortcut ⌘)', ['leave']), false, 'ignore unrelated labels');
     expect(requestedAction(['diagnose-zoom']), 'diagnose-zoom', 'accept the read-only Zoom diagnostic');
+    expect(requestedAction(['diagnose-teams']), 'diagnose-teams', 'accept the read-only Teams diagnostic');
     for (const args of [[], ['invalid'], ['mute', 'exit']]) refuses(() => requestedAction(args), 'Usage:');
 
     const chrome = {bundleIdentifier: $('com.google.Chrome'), get terminate() {
@@ -80,6 +81,22 @@ function testControlScope() {
         refuses(() => chooseMeeting(eligible, 999), 'Multiple');
         expect(isMeetingWindow(idle, 'Teams'), false, 'a generic Leave button can belong to a team, not a call');
         expect(isMeetingWindow({...idle, AXDOMIdentifier: 'hangup-button'}, 'Teams'), true, 'Teams hangup control proves a call');
+        const teams = teamsWindowReport({
+            AXRole: 'AXWindow', AXTitle: 'Private meeting title', AXMain: true, AXChildren: [{
+                AXRole: 'AXWebArea', AXChildren: [
+                    {AXRole: 'AXButton', AXTitle: 'Mute Private Person', AXDOMIdentifier: 'mute-private-person'},
+                    {AXRole: 'AXButton', AXTitle: 'Leave (Cmd+Shift+H)', AXDOMIdentifier: 'hangup-button', AXEnabled: true},
+                    {AXRole: 'AXButton', AXDescription: 'Turn on camera', AXDOMIdentifier: 'camera-button', AXEnabled: false},
+                ],
+            }],
+        });
+        expect(teams.recognized, true, 'diagnose the same Teams call marker as the shortcut');
+        expect(teams.roles.AXWebArea, 1, 'report whether the Teams web view is exposed');
+        expect(JSON.stringify(teams.controls), JSON.stringify([
+            {role: 'AXButton', AXDOMIdentifier: 'camera-button', AXDescription: 'Turn on camera', enabled: false},
+            {role: 'AXButton', AXDOMIdentifier: 'hangup-button', AXTitle: 'Leave (Cmd+Shift+H)', enabled: true},
+        ]), 'report safe Teams control labels, identifiers, and enabled state');
+        expect(JSON.stringify(teams).includes('Private'), false, 'omit private Teams content from the report');
 
         const participant = {AXRole: 'AXButton', AXTitle: 'Stop video'};
         const ownCamera = {AXRole: 'AXMenuItem', AXTitle: 'Start video', AXEnabled: true};

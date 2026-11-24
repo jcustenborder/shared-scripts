@@ -61,7 +61,13 @@ If a Zoom call isn't detected, check the `Zoom detection:` details in the error.
 /usr/bin/osascript apple/meeting.applescript diagnose-zoom
 ```
 
-This reports app-control permission, running Zoom apps, window structure, and known call controls without changing focus or clicking anything. It does not print meeting titles. If `appControl` is `false`, grant Terminal app-control permission or run the same action from a launcher that already has it.
+For Microsoft Teams, run this while the call is open:
+
+```sh
+/usr/bin/osascript apple/meeting.applescript diagnose-teams
+```
+
+These commands report app-control permission, running apps, window structure, and known call controls without changing focus or clicking anything. They do not print meeting titles. If `appControl` is `false`, grant Terminal app-control permission or run the same action from a launcher that already has it.
 
 For the automated decision tests (no meeting needed), run from the repository root:
 

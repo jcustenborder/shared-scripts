@@ -34,7 +34,8 @@ const zoomControlHints = [...Object.values(labels.Zoom).flat(), 'join audio', 'j
 /** @param {string[]} args */
 function run(args) {
     const action = requestedAction(args);
-    if (action === 'diagnose-zoom') return diagnoseZoom();
+    if (action === 'diagnose-zoom') return diagnoseApp('Zoom');
+    if (action === 'diagnose-teams') return diagnoseApp('Teams');
     const lockPath = ObjC.unwrap($.NSTemporaryDirectory()) + 'shared-scripts-meeting.lock';
     return withMeetingLock(lockPath, () => runAction(action));
 }
@@ -92,22 +93,27 @@ function runAction(action) {
 
 /** @param {string[]} args */
 function requestedAction(args) {
-    if (args.length === 1 && [...Object.keys(inverse), 'focus', 'exit', 'diagnose-zoom'].includes(args[0])) return args[0];
-    throw new Error('Usage: osascript meeting.applescript <mute|unmute|camera-on|camera-off|focus|exit|diagnose-zoom>');
+    if (args.length === 1 && [...Object.keys(inverse), 'focus', 'exit', 'diagnose-zoom', 'diagnose-teams'].includes(args[0])) {
+        return args[0];
+    }
+    throw new Error('Usage: osascript meeting.applescript <mute|unmute|camera-on|camera-off|focus|exit|diagnose-zoom|diagnose-teams>');
 }
 
-function diagnoseZoom() {
+/** @param {'Zoom'|'Teams'} kind */
+function diagnoseApp(kind) {
     const appControl = $.AXIsProcessTrusted();
-    const zoomApps = [];
+    const zoom = kind === 'Zoom';
+    const bundlePattern = zoom ? /zoom/i : /^com\.microsoft\.teams/i;
+    const apps = [];
     for (const app of elements($.NSWorkspace.sharedWorkspace.runningApplications)) {
         const bundleID = ObjC.unwrap(app.bundleIdentifier) || '';
-        if (app.isTerminated || !/zoom/i.test(bundleID)) continue;
-        const result = {bundleID, recognizedBundle: runningKind(app) === 'Zoom'};
+        if (app.isTerminated || !bundlePattern.test(bundleID)) continue;
+        const result = {bundleID, recognizedBundle: runningKind(app) === kind};
         if (!app.bundleURL.isNil()) {
             const bundle = $.NSBundle.bundleWithURL(app.bundleURL);
             result.version = ObjC.unwrap(bundle.objectForInfoDictionaryKey('CFBundleShortVersionString'));
         }
-        zoomApps.push(result);
+        apps.push(result);
         if (!appControl) continue;
         try {
             const axApp = $.AXUIElementCreateApplication(app.processIdentifier);
@@ -116,19 +122,66 @@ function diagnoseZoom() {
             const focusedWindow = result.recognizedBundle ? attribute(axApp, 'AXFocusedWindow') : null;
             result.windows = elements(attribute(axApp, 'AXWindows')).map(window => {
                 try {
-                    return {...zoomWindowReport(window, result.recognizedBundle ? axApp : null),
-                        focused: focusedWindow !== null && $.CFEqual(focusedWindow, window)};
+                    const report = zoom
+                        ? zoomWindowReport(window, result.recognizedBundle ? axApp : null)
+                        : teamsWindowReport(window);
+                    return {...report, focused: focusedWindow !== null && $.CFEqual(focusedWindow, window)};
                 } catch (error) {
                     return {error: error.message};
                 }
             });
-            if (result.recognizedBundle) result.meetingMenu = zoomMenuReport(axApp);
+            if (zoom && result.recognizedBundle) result.meetingMenu = zoomMenuReport(axApp);
         } catch (error) {
             result.error = error.message;
         }
     }
     const macOS = ObjC.unwrap($.NSProcessInfo.processInfo.operatingSystemVersionString);
-    return JSON.stringify({macOS, appControl, zoomApps});
+    return JSON.stringify({macOS, appControl, [zoom ? 'zoomApps' : 'teamsApps']: apps});
+}
+
+/** @param {object} window Teams AXUIElement */
+function teamsWindowReport(window) {
+    const report = {
+        recognized: null,
+        subrole: ObjC.unwrap(attribute(window, 'AXSubrole')),
+        minimized: ObjC.unwrap(attribute(window, 'AXMinimized')),
+        main: ObjC.unwrap(attribute(window, 'AXMain')),
+        roles: Object.create(null),
+        controls: [],
+    };
+    try {
+        report.recognized = isMeetingWindow(window, 'Teams');
+    } catch (error) {
+        report.detectionError = error.message;
+    }
+    const knownLabels = [...Object.values(labels.Teams).flat(), 'leave', 'end call', 'join now', 'meeting controls',
+        'mute', 'unmute', 'turn on microphone', 'turn off microphone', 'turn on camera', 'turn off camera'];
+    const knownID = /^(?:hangup|leave|end|mute|unmute|microphone|mic|camera|video|audio|call|calling|meeting)(?:[-_.](?:button|toggle|menu|controls?|toolbar|call|meeting|mic|microphone|camera|video|audio))*$/i;
+    const shortcutHint = /\s+\((?:(?:ctrl|control|alt|option|shift|cmd|command|[⌘⌃⌥⇧])\s*\+?\s*)+[a-z0-9]\)$/i;
+    try {
+        for (const item of windowElements(window, 'Teams')) {
+            const role = ObjC.unwrap(attribute(item, 'AXRole'));
+            if (role) report.roles[role] = (report.roles[role] || 0) + 1;
+            if (!buttonRoles.includes(role) && !['AXGroup', 'AXToolbar', 'AXMenuItem'].includes(role)) continue;
+            const control = {role};
+            for (const field of ['AXDOMIdentifier', 'AXIdentifier']) {
+                const id = ObjC.unwrap(attribute(item, field));
+                if (typeof id === 'string' && knownID.test(id)) control[field] = id;
+            }
+            for (const field of ['AXTitle', 'AXDescription', 'AXHelp']) {
+                const label = ObjC.unwrap(attribute(item, field));
+                if (typeof label === 'string' && labelMatches(label.trim().replace(shortcutHint, ''), knownLabels)) {
+                    control[field] = label;
+                }
+            }
+            if (Object.keys(control).length > 1) {
+                report.controls.push({...control, enabled: ObjC.unwrap(attribute(item, 'AXEnabled'))});
+            }
+        }
+    } catch (error) {
+        report.scanError = error.message;
+    }
+    return report;
 }
 
 /** @param {object} window Zoom AXUIElement @param {object|null} [axApp] */
