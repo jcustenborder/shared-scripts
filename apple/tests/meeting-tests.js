@@ -134,6 +134,8 @@ function testControlScope() {
             expect(isMeetingWindow({...call, AXTitle: title}, 'Zoom', zoom.axApp), true,
                 'detect a verified Zoom call regardless of its title');
         }
+        expect(isMeetingWindow({...call, AXChildren: [...call.AXChildren, {AXRole: 'AXStaticText'}]}, 'Zoom', zoom.axApp),
+            true, 'static text does not disqualify a verified Zoom call');
         expect(zoomWindowReport(call, zoom.axApp).recognized, true, 'diagnostics use the same call detection');
         expect(isMeetingWindow({...call, AXMain: false}, 'Zoom', zoom.axApp), false,
             'do not target a secondary window with the same shape');

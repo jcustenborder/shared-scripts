@@ -249,12 +249,12 @@ function isMeetingWindow(window, kind, axApp = null, zoomMisses = null) {
     const zoomRoles = kind === 'Zoom' && axApp ? [] : null;
     for (const element of windowElements(window, kind)) {
         const role = ObjC.unwrap(attribute(element, 'AXRole'));
-        if (zoomRoles && element !== window) zoomRoles.push(role);
+        if (zoomRoles && element !== window && role !== 'AXStaticText') zoomRoles.push(role);
         if (!buttonRoles.includes(role)) continue;
         if (kind === 'Teams' && ObjC.unwrap(attribute(element, 'AXDOMIdentifier')) === 'hangup-button') return true;
         if (elementMatches(element, labels[kind].leave)) return true;
     }
-    // shortcut: only accept the observed Zoom window layout without a leave marker; revisit if Zoom exposes a stable identifier.
+    // shortcut: match the observed Zoom layout apart from changing static text; prefer a stable identifier if Zoom exposes one.
     if (!zoomRoles) return false;
     const buttons = zoomRoles.filter(role => role === 'AXButton').length;
     const tabGroups = zoomRoles.filter(role => role === 'AXTabGroup').length;
