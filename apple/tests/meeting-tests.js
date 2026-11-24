@@ -82,27 +82,34 @@ function testControlScope() {
         expect(isMeetingWindow({...idle, AXDOMIdentifier: 'hangup-button'}, 'Teams'), true, 'Teams hangup control proves a call');
 
         const participant = {AXRole: 'AXButton', AXTitle: 'Stop video'};
-        const ownCamera = {AXRole: 'AXMenuItem', AXTitle: 'Start video'};
+        const ownCamera = {AXRole: 'AXMenuItem', AXTitle: 'Start video', AXEnabled: true};
+        const privateItem = {AXRole: 'AXMenuItem', AXTitle: 'Invite Private Person', AXEnabled: true};
         const zoom = {
             kind: 'Zoom',
             window: {AXChildren: [{AXRole: 'AXButton', AXTitle: 'End meeting'}, participant]},
             axApp: {AXMenuBar: {AXChildren: [
-                {AXRole: 'AXMenuBarItem', AXTitle: 'Meeting', AXChildren: [{AXRole: 'AXMenu', AXChildren: [ownCamera]}]},
+                {AXRole: 'AXMenuBarItem', AXTitle: 'Meeting',
+                    AXChildren: [{AXRole: 'AXMenu', AXChildren: [ownCamera, privateItem]}]},
             ]}},
         };
         expect(isMeetingWindow(zoom.window, 'Zoom'), true, 'Zoom has a specific call marker');
         expect(zoomWindowReport(zoom.window).recognized, true, 'report an existing Zoom match');
         const unmatched = zoomWindowReport({
-            AXRole: 'AXWindow', AXTitle: 'Private meeting title', AXChildren: [
+            AXRole: 'AXWindow', AXTitle: 'Zoom Meeting: Private meeting title', AXChildren: [
                 {AXRole: 'AXButton', AXDescription: 'End (⌘ + W)'},
                 {AXRole: 'AXButton', AXTitle: 'Leave Jane Smith'},
             ],
         });
         expect(unmatched.recognized, false, 'diagnostics do not broaden Zoom detection');
+        expect(unmatched.titleKind, 'zoom meeting', 'classify a window without sharing its title');
+        expect(unmatched.roles.AXButton, 2, 'report even controls that have no known marker');
         expect(JSON.stringify(unmatched.markers),
             JSON.stringify([{role: 'AXButton', field: 'AXDescription', label: 'End (⌘ + W)'}]),
             'show candidate call markers without including unrelated labels');
         expect(JSON.stringify(unmatched).includes('Private meeting title'), false, 'omit the meeting title');
+        expect(JSON.stringify(zoomMenuReport(zoom.axApp)),
+            JSON.stringify({itemCount: 2, controls: [{title: 'Start video', enabled: true}]}),
+            'diagnose Meeting menu availability and only report known control labels');
         const zoomControls = mediaControls(zoom);
         expect(zoomControls['camera-off'].length, 0, 'ignore another participant’s Stop video');
         expect(zoomControls['camera-on'][0], ownCamera, 'only use Zoom’s own Meeting menu command');

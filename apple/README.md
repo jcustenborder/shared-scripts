@@ -60,7 +60,7 @@ If a Zoom call isn't detected, run this from the repository root while Zoom is i
 /usr/bin/osascript apple/meeting.applescript diagnose-zoom
 ```
 
-This reports app-control permission, running Zoom apps, and candidate call controls without changing focus or clicking anything. If `appControl` is `false`, grant Terminal app-control permission or run the same action from a launcher that already has it.
+This reports app-control permission, running Zoom apps, window structure, and known call controls without changing focus or clicking anything. It does not print meeting titles. If `appControl` is `false`, grant Terminal app-control permission or run the same action from a launcher that already has it.
 
 For the automated decision tests (no meeting needed), run from the repository root:
 
