@@ -29,6 +29,7 @@ const buttonRoles = ['AXButton', 'AXToggleButton', 'AXCheckBox'];
 /** @param {string[]} args */
 function run(args) {
     const action = requestedAction(args);
+    if (action === 'diagnose-zoom') return diagnoseZoom();
     const lockPath = ObjC.unwrap($.NSTemporaryDirectory()) + 'shared-scripts-meeting.lock';
     return withMeetingLock(lockPath, () => runAction(action));
 }
@@ -84,8 +85,59 @@ function runAction(action) {
 
 /** @param {string[]} args */
 function requestedAction(args) {
-    if (args.length === 1 && [...Object.keys(inverse), 'focus', 'exit'].includes(args[0])) return args[0];
-    throw new Error('Usage: osascript meeting.applescript <mute|unmute|camera-on|camera-off|focus|exit>');
+    if (args.length === 1 && [...Object.keys(inverse), 'focus', 'exit', 'diagnose-zoom'].includes(args[0])) return args[0];
+    throw new Error('Usage: osascript meeting.applescript <mute|unmute|camera-on|camera-off|focus|exit|diagnose-zoom>');
+}
+
+function diagnoseZoom() {
+    const appControl = $.AXIsProcessTrusted();
+    const zoomApps = [];
+    for (const app of elements($.NSWorkspace.sharedWorkspace.runningApplications)) {
+        const bundleID = ObjC.unwrap(app.bundleIdentifier) || '';
+        if (app.isTerminated || !/zoom/i.test(bundleID)) continue;
+        const result = {bundleID, recognizedBundle: runningKind(app) === 'Zoom'};
+        if (!app.bundleURL.isNil()) {
+            const bundle = $.NSBundle.bundleWithURL(app.bundleURL);
+            result.version = ObjC.unwrap(bundle.objectForInfoDictionaryKey('CFBundleShortVersionString'));
+        }
+        zoomApps.push(result);
+        if (!appControl) continue;
+        try {
+            const axApp = $.AXUIElementCreateApplication(app.processIdentifier);
+            checkAX($.AXUIElementSetMessagingTimeout(axApp, 1), 'set an Accessibility timeout');
+            attribute(axApp, 'AXRole');
+            result.windows = elements(attribute(axApp, 'AXWindows')).map(window => {
+                try {
+                    return zoomWindowReport(window);
+                } catch (error) {
+                    return {error: error.message};
+                }
+            });
+        } catch (error) {
+            result.error = error.message;
+        }
+    }
+    const macOS = ObjC.unwrap($.NSProcessInfo.processInfo.operatingSystemVersionString);
+    return JSON.stringify({macOS, appControl, zoomApps});
+}
+
+/** @param {object} window Zoom AXUIElement */
+function zoomWindowReport(window) {
+    const recognized = isMeetingWindow(window, 'Zoom');
+    const markers = [];
+    // Only include control-like phrases and shortcut hints, not arbitrary UI text.
+    const leaveHint = /^(?:end|leave|quit|hang up|disconnect)(?: (?:or|end|leave|the|this|meeting|call|for|all|everyone|audio|webinar|zoom))*[.!]?(?: \((?:[⌘⌃⌥⇧]\s*\+?\s*)+[a-z0-9]\))?$/i;
+    for (const item of windowElements(window, 'Zoom')) {
+        const role = ObjC.unwrap(attribute(item, 'AXRole'));
+        if (item === window || role === 'AXWindow') continue;
+        for (const field of ['AXTitle', 'AXDescription', 'AXHelp']) {
+            const label = ObjC.unwrap(attribute(item, field));
+            if (typeof label === 'string' && leaveHint.test(label.trim())) markers.push({role, field, label});
+        }
+    }
+    const subrole = ObjC.unwrap(attribute(window, 'AXSubrole'));
+    const minimized = ObjC.unwrap(attribute(window, 'AXMinimized'));
+    return {recognized, subrole, minimized, markers};
 }
 
 /** @param {string} bundleID @param {string} startURL */

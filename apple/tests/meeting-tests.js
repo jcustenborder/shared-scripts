@@ -32,6 +32,7 @@ function run() {
     expect(labelMatches('Turn on microphone (⌘ + D)', ['turn on microphone']), true, 'accept a shortcut hint');
     expect(labelMatches('Unmute mic', ['mute mic']), false, 'never confuse inverse actions');
     expect(labelMatches('Leave (not a shortcut ⌘)', ['leave']), false, 'ignore unrelated labels');
+    expect(requestedAction(['diagnose-zoom']), 'diagnose-zoom', 'accept the read-only Zoom diagnostic');
     for (const args of [[], ['invalid'], ['mute', 'exit']]) refuses(() => requestedAction(args), 'Usage:');
 
     const chrome = {bundleIdentifier: $('com.google.Chrome'), get terminate() {
@@ -90,6 +91,18 @@ function testControlScope() {
             ]}},
         };
         expect(isMeetingWindow(zoom.window, 'Zoom'), true, 'Zoom has a specific call marker');
+        expect(zoomWindowReport(zoom.window).recognized, true, 'report an existing Zoom match');
+        const unmatched = zoomWindowReport({
+            AXRole: 'AXWindow', AXTitle: 'Private meeting title', AXChildren: [
+                {AXRole: 'AXButton', AXDescription: 'End (⌘ + W)'},
+                {AXRole: 'AXButton', AXTitle: 'Leave Jane Smith'},
+            ],
+        });
+        expect(unmatched.recognized, false, 'diagnostics do not broaden Zoom detection');
+        expect(JSON.stringify(unmatched.markers),
+            JSON.stringify([{role: 'AXButton', field: 'AXDescription', label: 'End (⌘ + W)'}]),
+            'show candidate call markers without including unrelated labels');
+        expect(JSON.stringify(unmatched).includes('Private meeting title'), false, 'omit the meeting title');
         const zoomControls = mediaControls(zoom);
         expect(zoomControls['camera-off'].length, 0, 'ignore another participant’s Stop video');
         expect(zoomControls['camera-on'][0], ownCamera, 'only use Zoom’s own Meeting menu command');
