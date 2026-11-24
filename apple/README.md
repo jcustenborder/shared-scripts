@@ -2,7 +2,7 @@
 
 Use the same hotkeys in the installed Google Meet web app, Microsoft Teams, and Zoom. Keep `meeting.applescript` and its `meeting-ui.js` helper together.
 
-## Set up on each Mac
+## Set up with Apple Shortcuts
 
 1. Install the desktop apps you use. For Google Meet, install it from Chrome as a web app; an ordinary Meet tab is intentionally unsupported.
 2. In **Shortcuts → Settings → Advanced**, enable **Allow Running Scripts**.
@@ -13,7 +13,35 @@ Use the same hotkeys in the installed Google Meet web app, Microsoft Teams, and 
    ```
 
 4. In the shortcut's details, use **Add Keyboard Shortcut** to assign a hotkey. Duplicate the shortcut for the other actions, replacing the last word with `unmute`, `camera-on`, `camera-off`, `focus`, or `exit`.
-5. With a test meeting open, run **Focus Meeting** once. If it reports a permission error, grant the shortcut runner access under **System Settings → Privacy & Security → Accessibility**. If you're testing from Terminal, Terminal needs its own permission.
+5. With a test meeting open, run **Focus Meeting** once. If it reports a permission error, grant **Shortcuts** access in the [macOS permissions panel](#macos-permissions). If you're testing from Terminal, Terminal needs its own permission.
+
+## Set up with Hammerspoon
+
+Use this alternative if the shortcut works from the Shortcuts editor but fails with its global hotkey. Hammerspoon runs `meeting.applescript` directly.
+
+1. Install [Hammerspoon](https://www.hammerspoon.org/) (`brew install --cask hammerspoon`) and open it. Grant **Hammerspoon** access in the [macOS permissions panel](#macos-permissions).
+2. Copy [`hammerspoon/init.lua`](hammerspoon/init.lua) to `~/.hammerspoon/init.lua`. If you already have a config, append the template instead of overwriting it.
+3. Edit `local script` to point to the absolute path of `meeting.applescript` on this Mac. Leave `meeting-ui.js` beside the AppleScript.
+4. Remove any conflicting Apple Shortcuts hotkeys, then choose **Reload Config** from the Hammerspoon menu. With a throwaway meeting open, try **Focus meeting** from another app.
+
+`MetaLeft` is the Windows key on a PC keyboard and maps to **Command** on macOS. `AltLeft` maps to **Option**. The table uses left-side key names for remapping tools; Hammerspoon accepts either side.
+
+| Action | Script argument | Key combination |
+| --- | --- | --- |
+| Mute | `mute` | `MetaLeft+ControlLeft+ShiftLeft+AltLeft+KeyM` |
+| Unmute | `unmute` | `MetaLeft+ControlLeft+ShiftLeft+AltLeft+KeyU` |
+| Camera on | `camera-on` | `MetaLeft+ControlLeft+ShiftLeft+AltLeft+KeyC` |
+| Camera off | `camera-off` | `MetaLeft+ControlLeft+ShiftLeft+AltLeft+KeyO` |
+| Focus meeting | `focus` | `MetaLeft+ControlLeft+ShiftLeft+AltLeft+KeyF` |
+| Exit meeting | `exit` | `MetaLeft+ControlLeft+ShiftLeft+AltLeft+KeyE` |
+
+## macOS permissions
+
+In **System Settings → Privacy & Security**, enable the launcher you use, not Chrome or the meeting app:
+
+- **macOS Tahoe 26:** **Accessibility**.
+- **macOS Golden Gate 27.0–27.2:** **Device Control and Data Access**.
+- **macOS Golden Gate 27.3 beta 2 and later:** Apple [split that setting](https://developer.apple.com/news/?id=oqng0zjk). Look under **System & App Protection Override** for app control.
 
 ## What the actions do
 
