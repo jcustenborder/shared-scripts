@@ -7,6 +7,9 @@ ObjC.bindFunction('close', ['int', ['int']]);
 
 const meetPrefix = 'com.google.Chrome.app.';
 const inverse = {mute: 'unmute', unmute: 'mute', 'camera-on': 'camera-off', 'camera-off': 'camera-on'};
+const teamsMediaIDs = {
+    mute: 'microphone-button', unmute: 'microphone-button', 'camera-on': 'video-button', 'camera-off': 'video-button',
+};
 const labels = {
     Meet: {
         leave: ['leave call'],
@@ -394,11 +397,14 @@ function* windowElements(window, kind) {
 function mediaControls(target) {
     const matches = {mute: [], unmute: [], 'camera-on': [], 'camera-off': []};
     const zoom = target.kind === 'Zoom';
+    const teams = target.kind === 'Teams';
     const available = zoom ? zoomMenuItems(target.axApp) : windowElements(target.window, target.kind);
     const roles = zoom ? ['AXMenuItem'] : buttonRoles;
     for (const element of available) {
         if (!roles.includes(ObjC.unwrap(attribute(element, 'AXRole')))) continue;
+        const id = teams ? ObjC.unwrap(attribute(element, 'AXDOMIdentifier')) : null;
         for (const key of Object.keys(matches)) {
+            if (teams && id !== teamsMediaIDs[key]) continue;
             if (elementMatches(element, labels[target.kind][key])
                 && !matches[key].some(match => $.CFEqual(match, element))) matches[key].push(element);
         }
@@ -465,16 +471,19 @@ function setControl(target, controls, action) {
         return `Already set: ${action}.`;
     }
     const options = labels[target.kind];
-    if (!elementMatches(button, options[action]) || elementMatches(button, options[opposite])) {
-        throw new Error('The meeting control changed before it could be pressed. No press sent.');
+    const teams = target.kind === 'Teams';
+    if ((teams && ObjC.unwrap(attribute(button, 'AXDOMIdentifier')) !== teamsMediaIDs[action]) ||
+        !elementMatches(button, options[action]) || elementMatches(button, options[opposite])) {
+        throw new Error('The meeting control changed before it could be activated. No action sent.');
     }
-    if (target.kind === 'Meet') {
-        sendMeetShortcut(workspace, target, action);
+    const usesShortcut = teams || target.kind === 'Meet';
+    if (usesShortcut) {
+        sendMeetingShortcut(workspace, target, action);
     } else {
         checkAX($.AXUIElementPerformAction(button, $('AXPress')), 'press the requested meeting control');
     }
 
-    const sent = target.kind === 'Meet' ? 'Sent the Meet shortcut' : 'Pressed the meeting control';
+    const sent = usesShortcut ? `Sent the ${target.kind} shortcut` : 'Pressed the meeting control';
     const failure = `${sent}, but could not confirm the requested state. Check the app before trying again.`;
     try {
         if (waitFor(() => {
@@ -488,16 +497,19 @@ function setControl(target, controls, action) {
     throw new Error(failure);
 }
 
-/** @param {object} workspace NSWorkspace @param {object} target Selected Meet app and window @param {string} action */
-function sendMeetShortcut(workspace, target, action) {
-    // Chromium can accept AXPress without activating the web button. Use Meet's shortcut after checking its state.
-    const key = action === 'mute' || action === 'unmute' ? $.kVK_ANSI_D : $.kVK_ANSI_E;
+/** @param {object} workspace NSWorkspace @param {object} target Selected meeting app and window @param {string} action */
+function sendMeetingShortcut(workspace, target, action) {
+    // Chromium can accept AXPress without activating the web button.
+    const teams = target.kind === 'Teams';
+    const [micKey, cameraKey] = teams ? [$.kVK_ANSI_M, $.kVK_ANSI_O] : [$.kVK_ANSI_D, $.kVK_ANSI_E];
+    const key = action === 'mute' || action === 'unmute' ? micKey : cameraKey;
+    const flags = Number($.kCGEventFlagMaskCommand) | (teams ? Number($.kCGEventFlagMaskShift) : 0);
     const down = $.CGEventCreateKeyboardEvent(null, Number(key), true);
     const up = $.CGEventCreateKeyboardEvent(null, Number(key), false);
-    if (!down || !up) throw new Error('Could not create the Meet shortcut. No key sent.');
-    $.CGEventSetFlags(down, Number($.kCGEventFlagMaskCommand));
-    $.CGEventSetFlags(up, Number($.kCGEventFlagMaskCommand));
-    if (!focused(workspace, target)) throw new Error('Focus changed before sending the Meet shortcut. No key sent.');
+    if (!down || !up) throw new Error(`Could not create the ${target.kind} shortcut. No key sent.`);
+    $.CGEventSetFlags(down, flags);
+    $.CGEventSetFlags(up, flags);
+    if (!focused(workspace, target)) throw new Error(`Focus changed before sending the ${target.kind} shortcut. No key sent.`);
     $.CGEventPostToPid(target.pid, down);
     $.CGEventPostToPid(target.pid, up);
 }

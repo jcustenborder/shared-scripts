@@ -43,7 +43,7 @@ function run() {
     testMeetingLock();
     testTeamsWebAccessibility();
     testControlScope();
-    testMeetMediaActions();
+    testMediaShortcuts();
     return 'Meeting decision tests passed.';
 }
 
@@ -236,17 +236,18 @@ function testTeamsWebAccessibility() {
     }
 }
 
-function testMeetMediaActions() {
+function testMediaShortcuts() {
     const savedAttribute = attribute;
     const savedFocused = focused;
     const savedPress = $.AXUIElementPerformAction;
     const savedPost = $.CGEventPostToPid;
     const target = {kind: 'Meet', pid: 123, window: {}};
     const button = {AXRole: 'AXButton', AXEnabled: true};
+    const nodes = [button];
     const events = [];
     let newTitle;
     attribute = (node, key) => node === target.window && key === 'AXChildren'
-        ? {count: 1, objectAtIndex: () => button}
+        ? {count: nodes.length, objectAtIndex: index => nodes[index]}
         : node[key] ?? null;
     focused = () => true;
     $.AXUIElementPerformAction = () => 0; // Reproduce the accepted press with no state change.
@@ -257,24 +258,33 @@ function testMeetMediaActions() {
         if (type === Number($.kCGEventKeyDown)) button.AXTitle = newTitle;
     };
     try {
-        for (const [action, before, after, keyCode] of [
-            ['mute', 'Turn off microphone', 'Turn on microphone', 2],
-            ['unmute', 'Turn on microphone', 'Turn off microphone', 2],
-            ['camera-off', 'Turn off camera', 'Turn on camera', 14],
-            ['camera-on', 'Turn on camera', 'Turn off camera', 14],
+        for (const [kind, action, before, after, keyCode, id] of [
+            ['Meet', 'mute', 'Turn off microphone', 'Turn on microphone', 2],
+            ['Meet', 'unmute', 'Turn on microphone', 'Turn off microphone', 2],
+            ['Meet', 'camera-off', 'Turn off camera', 'Turn on camera', 14],
+            ['Meet', 'camera-on', 'Turn on camera', 'Turn off camera', 14],
+            ['Teams', 'mute', 'Mute mic', 'Unmute mic', 46, 'microphone-button'],
+            ['Teams', 'unmute', 'Unmute mic', 'Mute mic', 46, 'microphone-button'],
+            ['Teams', 'camera-off', 'Turn camera off', 'Turn camera on', 31, 'video-button'],
+            ['Teams', 'camera-on', 'Turn camera on', 'Turn camera off', 31, 'video-button'],
         ]) {
             events.length = 0;
             newTitle = after;
+            target.kind = kind;
+            button.AXDOMIdentifier = id;
             button.AXTitle = before;
-            expect(setControl(target, mediaControls(target), action), `Set: ${action}.`, 'confirm changed Meet state');
+            expect(setControl(target, mediaControls(target), action), `Set: ${action}.`, `confirm changed ${kind} state`);
             expect(setControl(target, mediaControls(target), action), `Already set: ${action}.`, 'do not toggle twice');
-            const command = Number($.kCGEventFlagMaskCommand);
-            expect(JSON.stringify(events), JSON.stringify([[123, 10, keyCode, command], [123, 11, keyCode, command]]),
-                'send one Command shortcut to the Meet PID only');
+            const flags = Number($.kCGEventFlagMaskCommand) | (kind === 'Teams' ? Number($.kCGEventFlagMaskShift) : 0);
+            expect(JSON.stringify(events), JSON.stringify([[123, 10, keyCode, flags], [123, 11, keyCode, flags]]),
+                `send one ${kind} shortcut to the meeting PID only`);
         }
         events.length = 0;
-        button.AXTitle = 'Turn off microphone';
+        nodes.push({AXRole: 'AXButton', AXTitle: 'Unmute mic', AXEnabled: true});
+        button.AXDOMIdentifier = 'microphone-button';
+        button.AXTitle = 'Mute mic';
         const controls = mediaControls(target);
+        expect(controls.unmute.length, 0, 'ignore a Teams control without the own-mic identifier');
         const ambiguous = {...controls, mute: [button, button]};
         refuses(() => setControl(target, ambiguous, 'mute'), 'unique');
         let focusChecks = 0;
