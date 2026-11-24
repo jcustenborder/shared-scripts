@@ -95,16 +95,25 @@ function testControlScope() {
         expect(isMeetingWindow(zoom.window, 'Zoom'), true, 'Zoom has a specific call marker');
         expect(zoomWindowReport(zoom.window).recognized, true, 'report an existing Zoom match');
         const unmatched = zoomWindowReport({
-            AXRole: 'AXWindow', AXTitle: 'Zoom Meeting: Private meeting title', AXChildren: [
-                {AXRole: 'AXButton', AXDescription: 'End (⌘ + W)'},
+            AXRole: 'AXWindow', AXTitle: 'Zoom Meeting: Private meeting title', AXIdentifier: 'ZMMeetingWindow',
+            AXMain: true, AXChildren: [
+                {AXRole: 'AXButton', AXDescription: 'End (⌘ + W)', AXIdentifier: 'Jane Smith'},
                 {AXRole: 'AXButton', AXTitle: 'Leave Jane Smith'},
+                {AXRole: 'AXTabGroup', AXDescription: 'Meeting controls'},
             ],
         });
         expect(unmatched.recognized, false, 'diagnostics do not broaden Zoom detection');
         expect(unmatched.titleKind, 'zoom meeting', 'classify a window without sharing its title');
         expect(unmatched.roles.AXButton, 2, 'report even controls that have no known marker');
+        expect(unmatched.main, true, 'report whether Zoom considers this its main window');
+        expect(JSON.stringify(unmatched.identifiers),
+            JSON.stringify([{role: 'AXWindow', identifier: 'ZMMeetingWindow'}]),
+            'report a native-style identifier without printing arbitrary identifier text');
         expect(JSON.stringify(unmatched.markers),
-            JSON.stringify([{role: 'AXButton', field: 'AXDescription', label: 'End (⌘ + W)'}]),
+            JSON.stringify([
+                {role: 'AXTabGroup', field: 'AXDescription', label: 'Meeting controls'},
+                {role: 'AXButton', field: 'AXDescription', label: 'End (⌘ + W)'},
+            ]),
             'show candidate call markers without including unrelated labels');
         expect(JSON.stringify(unmatched).includes('Private meeting title'), false, 'omit the meeting title');
         expect(JSON.stringify(zoomMenuReport(zoom.axApp)),

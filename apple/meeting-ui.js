@@ -27,6 +27,9 @@ const labels = {
 const buttonRoles = ['AXButton', 'AXToggleButton', 'AXCheckBox'];
 // Only report control-like phrases and shortcut hints, not arbitrary UI text.
 const zoomLeaveHint = /^(?:end|leave|quit|hang up|disconnect)(?: (?:or|end|leave|the|this|meeting|call|for|all|everyone|audio|webinar|zoom))*[.!]?(?: \((?:[⌘⌃⌥⇧]\s*\+?\s*)+[a-z0-9]\))?$/i;
+const zoomControlHints = [...Object.values(labels.Zoom).flat(), 'join audio', 'join computer audio',
+    'leave computer audio', 'meeting controls', 'show meeting controls', 'hide meeting controls',
+    'meeting info', 'share screen', 'participants', 'video render'];
 
 /** @param {string[]} args */
 function run(args) {
@@ -129,14 +132,21 @@ function diagnoseZoom() {
 function zoomWindowReport(window) {
     const recognized = isMeetingWindow(window, 'Zoom');
     const markers = [];
+    const identifiers = [];
     const roles = Object.create(null);
     for (const item of windowElements(window, 'Zoom')) {
         const role = ObjC.unwrap(attribute(item, 'AXRole'));
         if (role) roles[role] = (roles[role] || 0) + 1;
+        const identifier = ObjC.unwrap(attribute(item, 'AXIdentifier'));
+        if (typeof identifier === 'string' && /^(?:(?:us|com)\.zoom\.[a-z]|(?:Zoom|ZM|_?NS)[A-Z])[a-zA-Z._-]{0,79}$/.test(identifier)) {
+            identifiers.push({role, identifier});
+        }
         if (item === window || role === 'AXWindow') continue;
         for (const field of ['AXTitle', 'AXDescription', 'AXHelp']) {
             const label = ObjC.unwrap(attribute(item, field));
-            if (typeof label === 'string' && zoomLeaveHint.test(label.trim())) markers.push({role, field, label});
+            if (typeof label === 'string' && (zoomLeaveHint.test(label.trim()) || labelMatches(label, zoomControlHints))) {
+                markers.push({role, field, label});
+            }
         }
     }
     const title = ObjC.unwrap(attribute(window, 'AXTitle'));
@@ -145,18 +155,18 @@ function zoomWindowReport(window) {
         : null;
     const subrole = ObjC.unwrap(attribute(window, 'AXSubrole'));
     const minimized = ObjC.unwrap(attribute(window, 'AXMinimized'));
-    return {recognized, titleKind, subrole, minimized, roles, markers};
+    const main = ObjC.unwrap(attribute(window, 'AXMain'));
+    return {recognized, titleKind, subrole, minimized, main, roles, identifiers, markers};
 }
 
 /** @param {object} axApp AXUIElement for Zoom */
 function zoomMenuReport(axApp) {
     const items = zoomMenuItems(axApp);
-    const expected = [...Object.values(labels.Zoom).flat(), 'join audio', 'join computer audio', 'leave computer audio'];
     const controls = [];
     for (const item of items) {
         if (ObjC.unwrap(attribute(item, 'AXRole')) !== 'AXMenuItem') continue;
         const title = ObjC.unwrap(attribute(item, 'AXTitle'));
-        if (typeof title !== 'string' || !(labelMatches(title, expected) || zoomLeaveHint.test(title.trim()))) continue;
+        if (typeof title !== 'string' || !(labelMatches(title, zoomControlHints) || zoomLeaveHint.test(title.trim()))) continue;
         controls.push({title, enabled: ObjC.unwrap(attribute(item, 'AXEnabled')) === true});
     }
     return {itemCount: items.length, controls};
